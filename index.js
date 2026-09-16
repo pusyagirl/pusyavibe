@@ -55,6 +55,8 @@ const defaults = {
     wizDone: false,                       // мастер первого входа пройден или пропущен
     tourDone: false,                      // экскурсия показана
     tab: 'home',                          // открытый раздел панели
+    fab: true,                            // кнопка ≋ поверх чата
+    fabPos: null,                         // куда её утащили: { x, y }
     tone:'Держись сцены: нежность — 3-8, нарастание — 9-14, пик — 15-20. Меняй интенсивность по ходу описания, а не один раз в конце.',
 };
 
@@ -1701,7 +1703,12 @@ function panic(why) {
 /* ═══════════════ отрисовка ═══════════════ */
 
 const PV_VERSION = '1.13.0';
-const BASE = '/scripts/extensions/third-party/SillyTavern-PusyaVibe/';
+/* Где лежит расширение. Таверна называет папку по имени репозитория, поэтому
+   путь берём от самого файла, а не пишем руками: иначе при другом имени папки
+   settings.html не находится и панель молча не появляется. */
+const BASE = (() => {
+    try { return new URL('.', import.meta.url).pathname; } catch { return '/scripts/extensions/third-party/SillyTavern-PusyaVibe/'; }
+})();
 
 const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const hhmm = (t) => { const d = new Date(t); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); };
@@ -1752,6 +1759,8 @@ function paintStatus() {
     paintKinds();
     paintWarn();
     wizRefresh();
+    paintFab();
+    if ($('#pv_mini').length && !$('#pv_mini').prop('hidden') && !$('#pv_mini_on').is(':focus')) paintMini();
 }
 
 /* ── картина сцены: последние полторы минуты ── */
@@ -1788,6 +1797,7 @@ function paintMeter() {
     $('#pv_fill').css('width', (слепо ? 0 : v / 20 * 100) + '%');
     $('#pv_live').text(слепо ? '·' : v);
     pushHist(v);
+    paintFab();
 }
 
 function paintLog() {
@@ -2247,6 +2257,12 @@ const WIZ_IMG = {
     scan: BASE + 'img/scan.jpg',
 };
 
+// Где мост лежит на диске после установки: папка расширения называется по репозиторию.
+function bridgeLocalPath() {
+    const папка = decodeURIComponent((BASE.match(/third-party\/([^/]+)\/?$/) || [])[1] || 'SillyTavern-PusyaVibe');
+    return 'SillyTavern/data/default-user/extensions/' + папка + '/bridge/pusya-vibe-bridge.mjs';
+}
+
 function wizImg(имя, подпись) {
     const src = WIZ_IMG[имя];
     if (!src) return '';
@@ -2326,7 +2342,9 @@ const WIZ = [
             if (s.transport === 'bridge' || s.transport === 'lovense') {
                 h += '<div class="pv-wz-note">' + esc(TRANSPORT_NOTE[s.transport]) + '</div>' +
                     '<ol class="pv-ol">' +
-                    '<li>Скопируй <code>pusya-vibe-bridge.mjs</code> в папку <code>plugins/</code> внутри SillyTavern.</li>' +
+                    '<li>Файл моста уже скачан вместе с расширением, но Таверна запускает серверные части только из папки <code>plugins/</code>. ' +
+                    'В терминале в папке SillyTavern: <code>npm run plugins:install</code> и ссылка на репозиторий расширения. ' +
+                    'Или скопируй вручную <code>' + esc(bridgeLocalPath()) + '</code> в <code>SillyTavern/plugins/</code>.</li>' +
                     '<li>В <code>config.yaml</code> поставь <code>enableServerPlugins: true</code>.</li>' +
                     '<li>Перезапусти Таверну — в консоли появится «мост готов».</li>' +
                     '</ol>' +
@@ -2647,11 +2665,151 @@ function placeBubble() {
     b.css({ top: Math.round(top) + 'px', left: Math.round(left) + 'px' });
 }
 
+/* ═══════════════ кнопка ≋ поверх чата ═══════════════
+   Настройки Таверны далеко, а СТОП и «что сейчас играет» нужны под рукой.
+   Кнопку можно утащить куда удобно — место запоминается. Нажатие открывает
+   маленький пульт, оттуда же — в полные настройки. */
+
+function fabDefault() { return { x: window.innerWidth - 64, y: window.innerHeight - 170 }; }
+
+function clampFab() {
+    const fab = $('#pv_fab')[0];
+    if (!fab) return;
+    const p = S().fabPos || fabDefault();
+    const x = clamp(p.x, 4, window.innerWidth - 48), y = clamp(p.y, 4, window.innerHeight - 48);
+    fab.style.left = x + 'px'; fab.style.top = y + 'px';
+    placeMini();
+}
+
+function mountFab() {
+    if (!S().fab) { $('#pv_fab, #pv_mini').remove(); return; }
+    if ($('#pv_fab').length) return;
+    const fab = $('<div id="pv_fab" class="pv-fab" role="button" tabindex="0" title="PUSYA VIBE">≋</div>').appendTo('body');
+    $('<div id="pv_mini" class="pv-mini" hidden></div>').appendTo('body');
+    clampFab();
+
+    // тянем — переносим, коротко нажали — открываем пульт
+    let sx = 0, sy = 0, ox = 0, oy = 0, on = false, moved = false;
+    fab.on('pointerdown', (e) => {
+        on = true; moved = false; sx = e.clientX; sy = e.clientY;
+        const r = fab[0].getBoundingClientRect(); ox = r.left; oy = r.top;
+        try { fab[0].setPointerCapture(e.pointerId); } catch { /* не везде есть */ }
+    });
+    fab.on('pointermove', (e) => {
+        if (!on) return;
+        const dx = e.clientX - sx, dy = e.clientY - sy;
+        if (!moved && Math.abs(dx) + Math.abs(dy) < 7) return;
+        moved = true;
+        S().fabPos = { x: ox + dx, y: oy + dy };
+        clampFab();
+    });
+    fab.on('pointerup pointercancel', () => {
+        if (!on) return;
+        on = false;
+        if (moved) { saveSettingsDebounced(); return; }
+        toggleMini();
+    });
+    fab.on('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleMini(); } });
+    $('#pv_mini').on('click', '[data-mini]', function () { miniDo($(this).attr('data-mini')); });
+    $('#pv_mini').on('change', '#pv_mini_on', function () {
+        $('#pv_enabled').prop('checked', $(this).prop('checked')).trigger('change');
+    });
+    $(window).off('resize.pvfab').on('resize.pvfab', clampFab);
+    // нажали мимо — пульт закрывается
+    $(document).off('pointerdown.pvfab').on('pointerdown.pvfab', (e) => {
+        if ($('#pv_mini').prop('hidden')) return;
+        if ($(e.target).closest('#pv_mini, #pv_fab').length) return;
+        $('#pv_mini').prop('hidden', true);
+    });
+    paintFab();
+}
+
+function toggleMini() {
+    const m = $('#pv_mini');
+    m.prop('hidden', !m.prop('hidden'));
+    if (!m.prop('hidden')) { paintMini(); placeMini(); }
+}
+
+// Пульт рядом с кнопкой: слева от неё, а если кнопка у левого края — справа.
+function placeMini() {
+    const fab = $('#pv_fab')[0], m = $('#pv_mini');
+    if (!fab || !m.length || m.prop('hidden')) return;
+    const r = fab.getBoundingClientRect();
+    const w = m.outerWidth() || 280, h = m.outerHeight() || 200;
+    let left = r.left - w - 10;
+    if (left < 8) left = r.right + 10;
+    left = clamp(left, 8, window.innerWidth - w - 8);
+    const top = clamp(r.bottom - h, 8, window.innerHeight - h - 8);
+    m.css({ left: left + 'px', top: top + 'px' });
+}
+
+function paintFab() {
+    const fab = $('#pv_fab');
+    if (!fab.length) return;
+    const v = Math.round(Math.max(live.v, live.r, live.p, live.s, live.t));
+    fab.attr('data-s', !connected ? 'off' : v > 0 ? 'play' : S().enabled ? 'on' : 'idle');
+    fab.attr('title', 'PUSYA VIBE — ' + (!connected ? 'не подключено' : v > 0 ? 'играет ' + v + '/20' : 'подключено'));
+    if (!$('#pv_mini').prop('hidden')) paintMiniLevel();
+}
+
+function paintMiniLevel() {
+    const v = Math.round(Math.max(live.v, live.r, live.p, live.s, live.t));
+    const слепо = !!S().blind;
+    $('#pv_mini_fill').css('width', (слепо ? 0 : v / 20 * 100) + '%');
+    $('#pv_mini_live').text(слепо ? '·' : v + '/20');
+}
+
+function paintMini() {
+    const s = S(), m = $('#pv_mini');
+    if (!m.length) return;
+    const caps = connected ? toyCaps() : null;
+    const имя = caps && caps.known ? caps.names.join(', ') : connected ? 'игрушек не видно' : 'не подключено';
+    m.html(
+        '<div class="pv-row pv-between" style="margin-top:0"><b>📳 PUSYA VIBE</b><span class="pv-live" id="pv_mini_live"></span></div>' +
+        `<div class="pv-devsub"><span class="pv-dot ${connected ? 'on' : ''}"></span> ${esc(имя)}</div>` +
+        '<div class="pv-meter"><div class="pv-fill" id="pv_mini_fill"></div></div>' +
+        `<label class="checkbox_label"><input type="checkbox" id="pv_mini_on" ${s.enabled ? 'checked' : ''}><span>Персонаж ведёт игрушку</span></label>` +
+        '<div class="pv-row">' +
+        (connected
+            ? '<input class="menu_button pv-red" type="button" data-mini="stop" value="СТОП">'
+            : '<input class="menu_button" type="button" data-mini="conn" value="Подключить">') +
+        '<input class="menu_button" type="button" data-mini="full" value="Все настройки">' +
+        '</div>');
+    paintMiniLevel();
+}
+
+async function miniDo(что) {
+    if (что === 'stop') { sinkStop('кнопка'); log('stop', 'стоп с кнопки ≋'); paintMini(); return; }
+    if (что === 'conn') { await doConnect(false); paintMini(); return; }
+    if (что === 'full') {
+        $('#pv_mini').prop('hidden', true);
+        // открываем панель «Расширения» Таверны, а в ней — наш блок
+        const drawer = $('#pv_root .inline-drawer-content');
+        if (!drawer.is(':visible')) {
+            const ext = $('#extensions-settings-button .drawer-toggle');
+            if (ext.length && !$('#rm_extensions_block').hasClass('openDrawer')) ext.trigger('click');
+            setTimeout(() => {
+                if (!$('#pv_root .inline-drawer-content').is(':visible')) $('#pv_root .inline-drawer-toggle').trigger('click');
+                setTimeout(() => $('#pv_root')[0]?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 250);
+            }, 250);
+        } else {
+            $('#pv_root')[0]?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+    }
+}
+
 /* ═══════════════ запуск ═══════════════ */
 
 jQuery(async () => {
-    const html = await (await fetch(BASE + 'settings.html')).text();
-    $('#extensions_settings2').append(html);
+    const r = await fetch(BASE + 'settings.html');
+    if (!r.ok) {
+        console.error('[PUSYA VIBE] не нашла панель по адресу ' + BASE + 'settings.html — ' + r.status);
+        toastr.error('PUSYA VIBE: не нашла файлы панели. Переустанови расширение.');
+        return;
+    }
+    const html = await r.text();
+    // Правая колонка есть не во всех раскладках Таверны — тогда в общую.
+    $($('#extensions_settings2').length ? '#extensions_settings2' : '#extensions_settings').append(html);
 
     const s = S();
     const save = () => saveSettingsDebounced();
@@ -2669,12 +2827,13 @@ jQuery(async () => {
     const флажки = {
         pv_gate: 'gate', pv_loop: 'loop', pv_reply: 'reply', pv_blind: 'blind', pv_flowlive: 'flowLive',
         pv_fetremind: 'fetRemind', pv_fetdrive: 'fetDrive', pv_gentle: 'gentle', pv_breathe: 'breathe',
-        pv_hint: 'hintOn', pv_orders: 'orders', pv_pace: 'paceHint', pv_toytell: 'toyTell',
+        pv_hint: 'hintOn', pv_orders: 'orders', pv_pace: 'paceHint', pv_toytell: 'toyTell', pv_fab_on: 'fab',
     };
     for (const [id, key] of Object.entries(флажки)) {
         $('#' + id).prop('checked', !!s[key]).on('change', function () {
             s[key] = $(this).prop('checked'); save();
             if (key === 'toyTell') toyToldAt = 0;
+            if (key === 'fab') mountFab();
             if (key === 'blind') { paintMeter(); paintGraph(); }
             buildPrompt(); paintBrainBoxes();
         });
@@ -2784,6 +2943,9 @@ jQuery(async () => {
         loadChatCfg(); paintChatNote(); paintFetish();
         buildPrompt();
     });
+
+    mountFab();
+    $('#pv_fab_reset').on('click', () => { s.fabPos = null; save(); mountFab(); clampFab(); toastr.info('кнопка ≋ вернулась на место'); });
 
     startPolling();
     startHeartbeat();

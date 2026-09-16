@@ -1,0 +1,8 @@
+{
+  "name": "pusyavibe",
+  "version": "1.13.0",
+  "private": true,
+  "description": "PUSYA VIBE: мост для SillyTavern. Этот же репозиторий ставится и как расширение, и как серверный плагин.",
+  "main": "bridge/pusya-vibe-bridge.mjs",
+  "author": "PUSYA · t.me/pusgir"
+}
