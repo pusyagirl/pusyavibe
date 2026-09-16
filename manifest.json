@@ -1,0 +1,11 @@
+{
+    "display_name": "PUSYA VIBE",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "PUSYA · t.me/pusgir",
+    "version": "1.13.0",
+    "homePage": "https://t.me/pusgir"
+}

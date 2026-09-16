@@ -1,0 +1,378 @@
+/* PUSYA VIBE — оформление панели в настройках Таверны.
+   Всё под префиксом .pv-, чтобы не задеть темы и другие расширения.
+   Цвета берём из темы Таверны, свои — только для акцентов. */
+
+.pv-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+}
+
+.pv-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+}
+
+.pv-row > .menu_button { flex: 1; margin: 0; }
+.pv-row > .text_pole { flex: 1; margin: 0; }
+.pv-between { justify-content: space-between; }
+
+.pv-card,
+.pv-sec {
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, .3));
+    border-radius: 12px;
+    padding: 9px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.pv-sec { margin-bottom: 8px; }
+.pv-pane[hidden] { display: none !important; }
+
+.pv-lbl {
+    font-size: .78em;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    opacity: .75;
+}
+
+.pv-note {
+    font-size: .9em;
+    opacity: .85;
+    line-height: 1.45;
+    margin-bottom: 2px;
+}
+
+.pv-pick {
+    font-size: .8em;
+    opacity: .7;
+    margin-top: 8px;
+}
+
+.pv-main-sw span { font-weight: 700; }
+
+/* устройство */
+.pv-dev {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-top: 4px;
+}
+
+.pv-devico {
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: 10px;
+    display: grid;
+    place-items: center;
+    font-size: 1.1em;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, .3));
+}
+
+.pv-devtext { flex: 1; min-width: 0; }
+.pv-devname { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-devsub { font-size: .85em; opacity: .75; }
+
+.pv-live {
+    font-weight: 700;
+    min-width: 2ch;
+    text-align: right;
+    color: #ff9d5c;
+}
+
+.pv-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #777;
+    flex: none;
+}
+
+.pv-dot.on { background: #4ddb8c; box-shadow: 0 0 8px rgba(77, 219, 140, .7); }
+.pv-dot.err { background: #ff6a6a; }
+.pv-dot.wait { background: #f0c36d; }
+
+.pv-meter {
+    height: 8px;
+    border-radius: 5px;
+    background: rgba(128, 128, 128, .25);
+    overflow: hidden;
+    margin-top: 4px;
+}
+
+.pv-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 5px;
+    background: linear-gradient(90deg, #8f5bd6, #ff5f9e, #ff9d5c);
+    transition: width .18s linear;
+}
+
+.menu_button.pv-red {
+    border-color: rgba(255, 86, 86, .7);
+    color: #ffd9d9;
+    font-weight: 700;
+}
+
+.pv-range { width: 100%; }
+
+/* меню */
+.pv-ask {
+    font-size: .85em;
+    opacity: .7;
+    margin: 2px 0 6px;
+}
+
+.pv-menu {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 7px;
+}
+
+.pv-mt {
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, .3));
+    border-radius: 12px;
+    padding: 10px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    transition: border-color .15s, background .15s;
+}
+
+.pv-mt:hover { border-color: rgba(214, 98, 138, .8); background: rgba(214, 98, 138, .07); }
+.pv-mt i { font-style: normal; font-size: 1.2em; }
+.pv-mt b { font-size: 1em; }
+.pv-mt span { font-size: .82em; opacity: .75; line-height: 1.35; }
+
+.pv-warn {
+    border: 1px solid rgba(240, 195, 109, .6);
+    background: rgba(240, 195, 109, .08);
+    border-radius: 12px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.pv-warn span { font-size: .88em; opacity: .85; }
+
+.pv-backbar {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    padding: 6px 0 2px;
+    background: var(--SmartThemeBlurTintColor, rgba(20, 20, 20, .85));
+    backdrop-filter: blur(6px);
+}
+
+.pv-backbar[hidden] { display: none !important; }
+.pv-backbar .menu_button { width: 100%; margin: 0; }
+.pv-foot { text-align: center; }
+
+/* кнопки-варианты вместо ползунков */
+.pv-chips {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.pv-chip {
+    padding: 4px 10px;
+    border-radius: 9px;
+    font-size: .88em;
+    cursor: pointer;
+    border: 1px solid rgba(128, 128, 128, .4);
+    opacity: .8;
+    user-select: none;
+}
+
+.pv-chip:hover { opacity: 1; }
+
+.pv-chip.on {
+    opacity: 1;
+    border-color: rgba(214, 98, 138, .9);
+    background: rgba(214, 98, 138, .16);
+    font-weight: 700;
+}
+
+/* график */
+.pv-graph {
+    height: 46px;
+    display: flex;
+    align-items: flex-end;
+    gap: 1px;
+    margin: 4px 0;
+    border-bottom: 1px solid rgba(128, 128, 128, .25);
+}
+
+.pv-graph i {
+    flex: 1;
+    min-height: 1px;
+    border-radius: 2px 2px 0 0;
+    background: linear-gradient(0deg, #8f5bd6, #ff5f9e);
+}
+
+/* журналы */
+.pv-log {
+    max-height: 160px;
+    overflow: auto;
+    font-size: .82em;
+    line-height: 1.5;
+}
+
+.pv-log b { opacity: .7; font-weight: 400; margin-right: 4px; }
+.pv-log .pv-logplay { color: #8fb89c; }
+.pv-log .pv-logerr { color: #f0a8a0; }
+
+/* предпочтения */
+.pv-fwho {
+    font-size: .9em;
+    font-weight: 700;
+    opacity: .9;
+    margin: 8px 0 3px;
+}
+
+.pv-fchip {
+    display: inline-block;
+    padding: 3px 8px;
+    margin: 0 4px 4px 0;
+    border-radius: 9px;
+    font-size: .85em;
+    border: 1px solid rgba(128, 128, 128, .35);
+    cursor: pointer;
+}
+
+.pv-fcards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.pv-fcard {
+    border: 1px solid rgba(128, 128, 128, .3);
+    border-radius: 10px;
+    padding: 7px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: .85em;
+}
+
+.pv-fcard span { opacity: .75; }
+.pv-fcard i { opacity: .6; font-size: .9em; }
+
+/* свой ритм */
+.pv-qprev {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 34px;
+    margin: 4px 0 6px;
+}
+
+.pv-qprev i {
+    min-width: 4px;
+    border-radius: 3px 3px 0 0;
+    background: linear-gradient(0deg, #8f5bd6, #ff5f9e);
+}
+
+.pv-qrow {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 5px;
+}
+
+.pv-qrow .pv-range { flex: 1; }
+.pv-qnum { font-size: .85em; opacity: .7; min-width: 70px; }
+.pv-qval { font-size: .85em; min-width: 44px; text-align: center; }
+.pv-qsec { width: 54px !important; text-align: center; padding: 3px; }
+.pv-qdel { cursor: pointer; opacity: .6; padding: 0 4px; }
+.pv-qdel:hover { opacity: 1; }
+
+.pv-ol {
+    margin: 4px 0 4px 18px;
+    padding: 0;
+    font-size: .92em;
+    line-height: 1.55;
+}
+
+/* ── мастер: окошки поверх Таверны ── */
+.pv-wz-back {
+    position: fixed;
+    inset: 0;
+    z-index: 30000;
+    background: rgba(0, 0, 0, .55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+
+.pv-wz-card {
+    width: min(460px, 100%);
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    display: flex;
+    flex-direction: column;
+    border-radius: 16px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, .4));
+    background: var(--SmartThemeBlurTintColor, #1c1618);
+    color: var(--SmartThemeBodyColor, #eee);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+}
+
+.pv-wz-top { padding: 14px 16px 6px; }
+.pv-wz-body { padding: 4px 16px; overflow: auto; line-height: 1.5; }
+.pv-wz-foot { padding: 10px 16px 14px; }
+
+.pv-wz-dots { display: flex; gap: 4px; margin-bottom: 8px; }
+.pv-wz-dots i { flex: 1; height: 3px; border-radius: 2px; background: rgba(128, 128, 128, .35); }
+.pv-wz-dots i.on { background: #ff5f9e; }
+.pv-wz-num { font-size: .75em; opacity: .65; text-transform: uppercase; letter-spacing: .06em; }
+.pv-wz-title { font-size: 1.2em; font-weight: 700; }
+.pv-wz-lead { margin-bottom: 6px; }
+.pv-wz-note { font-size: .9em; opacity: .8; margin-top: 6px; }
+.pv-wz-state { margin: 8px 0; }
+.pv-wz-img { display: block; max-width: 100%; border-radius: 10px; margin-top: 8px; border: 1px solid rgba(128, 128, 128, .3); }
+.pv-wz-cap { font-size: .8em; opacity: .65; margin-top: 3px; }
+.pv-wz-body code { font-size: .9em; }
+
+/* ── экскурсия: подсветка настоящего блока и облачко рядом ── */
+.pv-tour-on {
+    outline: 2px solid #ff5f9e !important;
+    outline-offset: 3px;
+    box-shadow: 0 0 0 6px rgba(255, 95, 158, .18);
+    border-radius: 12px;
+}
+
+.pv-bubble {
+    position: fixed;
+    z-index: 30001;
+    width: min(320px, calc(100vw - 32px));
+    border-radius: 14px;
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 95, 158, .7);
+    background: var(--SmartThemeBlurTintColor, #1c1618);
+    color: var(--SmartThemeBodyColor, #eee);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .5);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.pv-bubble .t { font-size: 1.05em; }
+.pv-bubble .s { font-size: .92em; opacity: .85; line-height: 1.45; }

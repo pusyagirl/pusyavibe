@@ -1,0 +1,302 @@
+<div class="inline-drawer" id="pv_root">
+    <div class="inline-drawer-toggle inline-drawer-header">
+        <b>PUSYA VIBE ≋ <span style="font-size:.8em;opacity:.7" id="pv_ver"></span></b>
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+    <div class="inline-drawer-content">
+        <div class="pv-wrap">
+
+            <!-- ── шапка: видна в любом разделе ── -->
+            <div class="pv-card" id="pv_head">
+                <label class="checkbox_label pv-main-sw" for="pv_enabled">
+                    <input type="checkbox" id="pv_enabled" />
+                    <span>Персонаж ведёт игрушку</span>
+                </label>
+                <small class="notes" id="pv_guard"></small>
+
+                <div class="pv-dev">
+                    <div class="pv-devico" id="pv_devico">≋</div>
+                    <div class="pv-devtext">
+                        <div class="pv-devname" id="pv_devname">нет игрушки</div>
+                        <div class="pv-devsub" id="pv_status">не подключено</div>
+                    </div>
+                    <span class="pv-dot" id="pv_dot"></span>
+                    <span class="pv-live" id="pv_live">0</span>
+                </div>
+                <div class="pv-meter"><div class="pv-fill" id="pv_fill"></div></div>
+                <div class="pv-row">
+                    <input id="pv_connect" class="menu_button" type="button" value="Подключить" />
+                    <input id="pv_test" class="menu_button" type="button" value="Тест" />
+                    <input id="pv_stop" class="menu_button pv-red" type="button" value="СТОП" />
+                </div>
+            </div>
+
+            <!-- ── меню: куда идти и что там лежит ── -->
+            <div class="pv-pane" id="pv_p_home">
+                <div id="pv_warn"></div>
+                <div class="pv-ask">что делаем?</div>
+                <div class="pv-menu">
+                    <div class="pv-mt" data-go="play"><i>📈</i><b>Сейчас</b><span>что с игрушкой прямо сейчас и каким характером играть</span></div>
+                    <div class="pv-mt" data-go="rhythm"><i>▶</i><b>Поиграть</b><span>готовые рисунки, свой ритм и код для подруги</span></div>
+                    <div class="pv-mt" data-go="fet"><i>🔥</i><b>Предпочтения</b><span>что заводит его и тебя — расширение ищет это в тексте</span></div>
+                    <div class="pv-mt" data-go="set"><i>🔌</i><b>Настройки</b><span>игрушка, кто ведёт сцену, границы и журнал</span></div>
+                </div>
+                <div class="pv-row" id="pv_wiz_row">
+                    <input id="pv_wiz_open" class="menu_button" type="button" value="Настроить по шагам" />
+                </div>
+            </div>
+
+            <!-- ── СЕЙЧАС ── -->
+            <div class="pv-pane" id="pv_p_play" hidden>
+                <div class="pv-sec">
+                    <div class="pv-row pv-between">
+                        <span class="pv-lbl">Последние 1,5 минуты</span>
+                        <small class="notes" id="pv_sess">тихо</small>
+                    </div>
+                    <div class="pv-graph" id="pv_graph"></div>
+                    <label class="checkbox_label" for="pv_blind">
+                        <input type="checkbox" id="pv_blind" />
+                        <span>Слепой режим — не показывать уровень</span>
+                    </label>
+                </div>
+                <div class="pv-sec">
+                    <div class="pv-lbl">Характер</div>
+                    <div class="pv-note">🎭 Общий тон. Одно касание меняет силу, резкость и то, как часто дразнить.</div>
+                    <div class="pv-chips" id="pv_profiles"></div>
+                    <small class="notes" id="pv_prof_hint"></small>
+                    <label class="checkbox_label" for="pv_perchat">
+                        <input type="checkbox" id="pv_perchat" />
+                        <span>Запомнить для этого чата</span>
+                    </label>
+                    <small class="notes" id="pv_chat_note"></small>
+                </div>
+                <div class="pv-sec">
+                    <div class="pv-lbl">Что играло</div>
+                    <div class="pv-note">🎵 Дорожка игры: паттерны, свой ритм и что расширение услышало в сцене.</div>
+                    <div class="pv-log" id="pv_play"></div>
+                </div>
+            </div>
+
+            <!-- ── ПОИГРАТЬ ── -->
+            <div class="pv-pane" id="pv_p_rhythm" hidden>
+                <div class="pv-sec">
+                    <div class="pv-lbl">Готовые</div>
+                    <div class="pv-note">▶ Нажала — играет. Что почувствуешь, написано под кнопками.</div>
+                    <div class="pv-chips" id="pv_presets"></div>
+                    <small class="notes" id="pv_pat_what"></small>
+                    <div class="pv-row pv-between">
+                        <span class="pv-lbl">Сколько играть</span>
+                        <b id="pv_patsec_v">1 мин</b>
+                    </div>
+                    <input id="pv_patsec" type="range" min="30" max="300" step="15" class="pv-range" />
+                    <label class="checkbox_label" for="pv_patloop">
+                        <input type="checkbox" id="pv_patloop" />
+                        <span>Играть по кругу</span>
+                    </label>
+                    <small class="notes" id="pv_patloop_note"></small>
+                </div>
+                <div class="pv-sec">
+                    <div class="pv-lbl">Свои</div>
+                    <div class="pv-note">🪜 Собери из ступенек: у каждой своя сила и время. Играют сверху вниз.</div>
+                    <div class="pv-qprev" id="pv_qprev"></div>
+                    <div id="pv_queue"></div>
+                    <div class="pv-row">
+                        <input id="pv_q_add" class="menu_button" type="button" value="+ ступенька" />
+                        <input id="pv_q_play" class="menu_button" type="button" value="Играть" />
+                    </div>
+                </div>
+                <div class="pv-sec">
+                    <div class="pv-lbl">Поделиться</div>
+                    <div class="pv-note">🔗 Свои ступеньки — коротким кодом. Подруга вставит и получит то же.</div>
+                    <input id="pv_q_code" class="text_pole" type="text" placeholder="PV1-5x20-12x30" />
+                    <div class="pv-row">
+                        <input id="pv_q_copy" class="menu_button" type="button" value="Копировать свой" />
+                        <input id="pv_q_apply" class="menu_button" type="button" value="Вставить чужой" />
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── ПРЕДПОЧТЕНИЯ ── -->
+            <div class="pv-pane" id="pv_p_fet" hidden>
+                <div class="pv-sec">
+                    <div class="pv-lbl">🔥 Что заводит</div>
+                    <div class="pv-note">🔥 Что заводит его и тебя. Расширение ищет это в тексте и отзывается.</div>
+                    <div class="pv-fwho" id="pv_fet_hername">персонаж</div>
+                    <div id="pv_fet_her"></div>
+                    <div class="pv-row">
+                        <input id="pv_fet_card" class="menu_button" type="button" value="Из карточки" />
+                        <input id="pv_fet_chat" class="menu_button" type="button" value="Из чата" />
+                    </div>
+                    <div class="pv-fwho" id="pv_fet_minename">ты</div>
+                    <input id="pv_fet_own" class="text_pole" type="text" placeholder="шёлк, шёпот, связывание" />
+                    <div id="pv_fet_mine"></div>
+                    <small class="notes">Лишнее у персонажа убирается нажатием на плашку.</small>
+                </div>
+                <div class="pv-sec">
+                    <div id="pv_fet_live"></div>
+                </div>
+                <div class="pv-sec" id="pv_fet_what">
+                    <label class="checkbox_label" for="pv_fetremind">
+                        <input type="checkbox" id="pv_fetremind" />
+                        <span>Подсказывать модели</span>
+                    </label>
+                    <small class="notes">тихо просит вплетать эти детали в текст — не списком, по одной за ответ. Это про прозу, игрушки не касается</small>
+                    <label class="checkbox_label" for="pv_fetdrive">
+                        <input type="checkbox" id="pv_fetdrive" />
+                        <span>Поддавать, когда сработало</span>
+                    </label>
+                    <small class="notes">в сцене мелькнули чулки или он прикусил шею — игрушка на пару секунд усилится поверх того, что играет, и вернётся обратно</small>
+                </div>
+            </div>
+
+            <!-- ── НАСТРОЙКИ ── -->
+            <div class="pv-pane" id="pv_p_set" hidden>
+                <div class="pv-sec" id="pv_sec_toy">
+                    <div class="pv-lbl">Игрушка</div>
+                    <div class="pv-note">🔌 Связь с устройством. Настраивается один раз.</div>
+                    <select id="pv_transport" class="text_pole">
+                        <option value="bridge">Intiface через мост (рекомендую)</option>
+                        <option value="direct">Intiface напрямую из браузера</option>
+                        <option value="lovense">Lovense Remote через мост</option>
+                    </select>
+                    <small class="notes" id="pv_transport_note"></small>
+                    <div id="pv_wsbox">
+                        <label for="pv_ws"><small>Адрес Intiface</small></label>
+                        <input id="pv_ws" class="text_pole" type="text" placeholder="ws://127.0.0.1:12345" />
+                    </div>
+                    <div id="pv_lvbox" style="display:none">
+                        <label><small>Lovense Remote → Game Mode: адрес и порт</small></label>
+                        <div class="pv-row">
+                            <input id="pv_lvip" class="text_pole" type="text" placeholder="127.0.0.1" />
+                            <input id="pv_lvport" class="text_pole" style="max-width:90px" type="text" placeholder="20010" />
+                        </div>
+                    </div>
+                    <label class="checkbox_label" for="pv_gentle">
+                        <input type="checkbox" id="pv_gentle" />
+                        <span>Беречь Bluetooth</span>
+                    </label>
+                    <small class="notes">команды пореже — если игрушка сама отваливается через пару минут, включи</small>
+                    <div id="pv_devs"></div>
+                    <div id="pv_kinds"></div>
+                    <div class="pv-row">
+                        <input id="pv_wiz_again" class="menu_button" type="button" value="Настройка заново" />
+                        <input id="pv_tour_again" class="menu_button" type="button" value="Экскурсия по панели" />
+                    </div>
+                    <small class="notes">первое — окошки про Intiface и мост, второе — указатели по кнопкам</small>
+                </div>
+
+                <div class="pv-sec" id="pv_sec_brain">
+                    <div class="pv-lbl">Кто ведёт сцену</div>
+                    <div class="pv-note">🧠 Кто решает, насколько сильно вибрировать: само расширение по тексту или отдельная модель.</div>
+                    <div class="pv-chips" id="pv_brains"></div>
+                    <small class="notes" id="pv_brain_note"></small>
+                    <div id="pv_livebox">
+                        <label class="checkbox_label" for="pv_flowlive">
+                            <input type="checkbox" id="pv_flowlive" />
+                            <span>Отзываться по ходу печати</span>
+                        </label>
+                        <small class="notes">выключишь — сцена соберётся один раз, когда ответ дописан</small>
+                    </div>
+                    <div id="pv_modelbox" style="display:none">
+                        <input id="pv_ep" class="text_pole" type="text" placeholder="эндпоинт, напр. https://api.deepseek.com/v1" />
+                        <input id="pv_model" class="text_pole" type="text" placeholder="модель, напр. deepseek-chat" />
+                        <input id="pv_key" class="text_pole" type="password" placeholder="ключ" />
+                        <small class="notes">вписываешь один раз — адрес, модель и ключ хранятся в настройках Таверны.
+                            Пусто — расширение попросит саму Таверну, её текущим подключением.</small>
+                        <label class="checkbox_label" for="pv_gate">
+                            <input type="checkbox" id="pv_gate" />
+                            <span>Не тратить запрос на спокойные сцены</span>
+                        </label>
+                        <label class="checkbox_label" for="pv_hint">
+                            <input type="checkbox" id="pv_hint" />
+                            <span>Подсказывать, куда вести сцену</span>
+                        </label>
+                        <small class="notes">в том же запросе, без доплаты: модель смотрит, что уже было, и одной фразой подсказывает основной,
+                            что сделать иначе в следующем ответе — сменить темп, задержаться, вплести предпочтение</small>
+                        <small class="notes" id="pv_hint_last"></small>
+                    </div>
+                    <input id="pv_brain_now" class="menu_button" type="button" value="Разобрать последний ответ" />
+                    <label class="checkbox_label" for="pv_orders">
+                        <input type="checkbox" id="pv_orders" />
+                        <span>Слушаться персонажа</span>
+                    </label>
+                    <small class="notes">сказал «сильнее» — станет сильнее, «замри» — тишина. А если в сцене он берёт игрушку и включает её на максимум — включится настоящая</small>
+                    <label class="checkbox_label" for="pv_pace">
+                        <input type="checkbox" id="pv_pace" />
+                        <span>Не торопить сцену</span>
+                    </label>
+                    <small class="notes">просит модель вести близость ступенями и не сводить её к трём строчкам</small>
+                    <label class="checkbox_label" for="pv_toytell">
+                        <input type="checkbox" id="pv_toytell" />
+                        <span>Рассказать персонажу про игрушку</span>
+                    </label>
+                    <small class="notes">какая она и какими словами её включать — тогда в сцене будет именно твоя игрушка, и персонаж сможет ею управлять</small>
+                </div>
+
+                <div class="pv-sec" id="pv_sec_bounds">
+                    <div class="pv-lbl">Границы</div>
+                    <div class="pv-note">🛡 То, что останавливает игрушку. Выстави по себе.</div>
+                    <div class="pv-row pv-between"><small>Потолок силы</small><b><span id="pv_cap_v">14</span> / 20</b></div>
+                    <input id="pv_cap" type="range" min="1" max="20" step="1" class="pv-range" />
+                    <div class="pv-row pv-between"><small>Автостоп</small><b id="pv_max_v">20 мин</b></div>
+                    <input id="pv_max" type="range" min="0" max="60" step="5" class="pv-range" />
+                    <label for="pv_safeword"><small>Стоп-слово в моём сообщении</small></label>
+                    <input id="pv_safeword" class="text_pole" type="text" placeholder="стоп" />
+                    <small class="notes">напишешь его — всё остановится и персонаж перестанет вести игрушку</small>
+                </div>
+
+                <div class="pv-sec" id="pv_sec_char">
+                    <div class="pv-lbl">Характер игры</div>
+                    <div class="pv-note">🎚 Как играть то, что придумала модель. Профиль в «Сейчас» ставит всё сразу, здесь — по одному.</div>
+                    <div class="pv-pick">громкость</div>
+                    <div class="pv-chips" id="pv_gain"></div>
+                    <small class="notes">насколько громче или тише играть то, что назначила модель</small>
+                    <div class="pv-pick">отказ на пике</div>
+                    <div class="pv-chips" id="pv_deny"></div>
+                    <small class="notes">вместо максимума — тишина на несколько секунд, потом вполсилы</small>
+                    <div class="pv-pick">своеволие</div>
+                    <div class="pv-chips" id="pv_chaos"></div>
+                    <small class="notes">иногда сильнее, чем просили, иногда внезапная заминка</small>
+                </div>
+
+                <div class="pv-sec" id="pv_sec_behave">
+                    <div class="pv-lbl">Поведение</div>
+                    <div class="pv-note">⚙️ Мелочи, которые выставляют один раз и забывают.</div>
+                    <label class="checkbox_label" for="pv_reply">
+                        <input type="checkbox" id="pv_reply" />
+                        <span>Отклик на мои сообщения</span>
+                    </label>
+                    <small class="notes">короткая вставка, пока модель думает</small>
+                    <label class="checkbox_label" for="pv_loop">
+                        <input type="checkbox" id="pv_loop" />
+                        <span>Повторять сцену до ответа</span>
+                    </label>
+                    <small class="notes">программа от модели играет по кругу, пока не придёт следующий ответ</small>
+                    <label class="checkbox_label" for="pv_breathe">
+                        <input type="checkbox" id="pv_breathe" />
+                        <span>Дышать, пока модель думает</span>
+                    </label>
+                    <div class="pv-pick">переходы между уровнями</div>
+                    <div class="pv-chips" id="pv_smooth"></div>
+                    <small class="notes">резко — уровень прыгает сразу, мягко — плавно доезжает</small>
+                    <div class="pv-pick">между сценами</div>
+                    <div class="pv-chips" id="pv_idle"></div>
+                    <small class="notes">играть нечего — полная тишина или еле заметный фон</small>
+                </div>
+
+                <div class="pv-sec" id="pv_sec_log">
+                    <div class="pv-lbl">Что происходило</div>
+                    <div class="pv-note">📋 Связь, ошибки, заряд. Игра здесь отмечена одной строкой — подробно она в «Сейчас».</div>
+                    <div class="pv-log" id="pv_log"></div>
+                </div>
+            </div>
+
+            <!-- возврат в меню: закреплён внизу раздела -->
+            <div class="pv-backbar" id="pv_backbar" hidden>
+                <input id="pv_back" class="menu_button" type="button" value="↩ меню" />
+            </div>
+
+            <small class="notes pv-foot">Пуся · <a href="https://t.me/pusgir" target="_blank">t.me/pusgir</a></small>
+        </div>
+    </div>
+</div>
