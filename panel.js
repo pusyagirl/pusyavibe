@@ -124,11 +124,13 @@ if (C.brain === 'tags' || C.brain === 'local') C.brain = 'live';
 // у кого игрушка уже подключалась — мастер не показываем, они всё это прошли руками
 if (C.wizDone === undefined && C.everConnected) C.wizDone = true;
 // Ступеньки прежних версий — в кусок «ровно», чтобы свой ритм не пропал.
-if (C.lanes === undefined && Array.isArray(C.queue) && C.queue.length &&
-    JSON.stringify(C.queue) !== JSON.stringify([{ v: 5, sec: 20 }, { v: 12, sec: 30 }, { v: 3, sec: 15 }])){
-  C.lanes = [C.queue.filter(function(q){ return q && q.sec > 0; }).slice(0, 12)
+function queueToLanes(bag){
+  if (!bag || bag.lanes !== undefined || !Array.isArray(bag.queue) || !bag.queue.length) return;
+  if (JSON.stringify(bag.queue) === JSON.stringify([{ v: 5, sec: 20 }, { v: 12, sec: 30 }, { v: 3, sec: 15 }])) return;   // пример по умолчанию
+  bag.lanes = [bag.queue.filter(function(q){ return q && q.sec > 0; }).slice(0, 12)
     .map(function(q){ return { n: 'ровно', l: Math.max(0, Math.min(20, +q.v || 0)), s: Math.max(1, Math.min(600, +q.sec || 1)) }; }), []];
 }
+queueToLanes(C);
 delete C.queue;
 for (var k in DEF) if (C[k] === undefined) C[k] = DEF[k];
 /* Где всё лежит.
@@ -170,6 +172,7 @@ function loadCfgFromTavo(){
   for (var s in DEF) слепок[s] = JSON.stringify(C[s]);
   Promise.resolve(V.get(VAR_CFG, 'global')).then(function(v){
     if (!v || typeof v !== 'object') return;
+    queueToLanes(v);                                     // старое сохранение Таво — ступеньки тоже переносим
     var изменилось = false;
     for (var k in DEF){
       if (v[k] === undefined) continue;
@@ -2461,6 +2464,12 @@ function applyRhythmCode(code){
 /* ── панель дорожек ── */
 var laneSel = null;          // { l, i } — выбранный кусок
 
+function blockAlpha(b){
+  if (b.n === 'тишина') return 0.25;
+  if (b.n === 'ровно') return 0.35 + 0.65 * clamp(b.l, 0, 20) / 20;
+  return 0.45 + 0.55 * (СИЛА_КУСКА[b.p] || 0.65);
+}
+
 function blockTitle(b){
   if (b.n === 'ровно') return 'ровно ' + clamp(b.l, 0, 20);
   return b.n;
@@ -2479,19 +2488,27 @@ function lanesTwo(){
 function paintLanes(){
   var box = el('pv-lanes'); if (!box) return;
   var L = lanes(), двое = lanesTwo();
-  if (!двое && C.laneTo) C.laneTo = 0;
   var шкала = Math.max(laneSec(L[0]), двое ? laneSec(L[1]) : 0, 1);
   var h = '';
+  /* Куски — плиткой в несколько строк: так программа видна целиком, сколько бы
+     в ней ни было. Форму и длительность показывает тонкая полоска сверху. */
   (двое ? [0, 1] : [0]).forEach(function(li){
-    h += '<div class="pv-lane">' + (двое ? '<span class="pv-lanenm">мотор ' + (li + 1) + '</span>' : '') +
-      '<div class="pv-tape">';
-    if (!L[li].length) h += '<span class="pv-tapeempty">пусто</span>';
+    var сек = laneSec(L[li]);
+    h += '<div class="pv-lane"><div class="pv-lanehead"><span>' + (двое ? 'мотор ' + (li + 1) : 'программа') + '</span>' +
+      '<span>' + (L[li].length ? L[li].length + ' куск. · ' + секстр(сек) : 'пусто') + '</span></div>';
+    h += '<div class="pv-shape">';
     L[li].forEach(function(b, i){
       var sel = laneSel && laneSel.l === li && laneSel.i === i;
-      var яр = b.n === 'тишина' ? 0.25 : (b.n === 'ровно' ? 0.35 + 0.65 * clamp(b.l, 0, 20) / 20 : 0.45 + 0.55 * (СИЛА_КУСКА[b.p] || 0.65));
+      h += '<i class="' + (sel ? 'sel' : '') + (b.n === 'тишина' ? ' quiet' : '') + '" style="width:' + (b.s / шкала * 100).toFixed(2) +
+        '%;--a:' + blockAlpha(b).toFixed(2) + '"></i>';
+    });
+    h += '</div><div class="pv-chiprow">';
+    if (!L[li].length) h += '<span class="pv-tapeempty">' + (двое && C.laneTo !== li ? 'выбери «мотор ' + (li + 1) + '» ниже и добавляй куски' : 'нажимай куски выше — они встанут сюда') + '</span>';
+    L[li].forEach(function(b, i){
+      var sel = laneSel && laneSel.l === li && laneSel.i === i;
       h += '<div class="pv-blk' + (sel ? ' sel' : '') + (b.n === 'тишина' ? ' quiet' : '') + '" data-l="' + li + '" data-i="' + i + '"' +
-        ' style="width:' + (b.s / шкала * 100).toFixed(2) + '%;--a:' + яр.toFixed(2) + '">' +
-        '<b>' + esc(blockTitle(b)) + '</b><small>' + esc(blockSub(b)) + '</small></div>';
+        ' style="--a:' + blockAlpha(b).toFixed(2) + '">' +
+        '<b><u>' + (i + 1) + '</u>' + esc(blockTitle(b)) + '</b><small>' + esc(blockSub(b)) + '</small></div>';
     });
     h += '</div></div>';
   });
@@ -2508,6 +2525,7 @@ function paintLanes(){
     n.addEventListener('click', function(){
       var l = +n.getAttribute('data-l'), i = +n.getAttribute('data-i');
       laneSel = (laneSel && laneSel.l === l && laneSel.i === i) ? null : { l: l, i: i };
+      if (laneSel && lanesTwo()) C.laneTo = l;          // добавлять туда, где сейчас работаешь
       paintLanes();
     });
   });
@@ -2630,6 +2648,7 @@ function css(){
     // блоки
     '.pv-row{display:flex;align-items:center;gap:8px}',
     '.pv-head{justify-content:space-between;margin-bottom:12px}',
+    '.pv-head.pv-movable{cursor:move;user-select:none}',
     '.pv-sec{margin:7px 0;padding:10px 11px;border-radius:14px;background:#151018;border:1px solid rgba(200,100,120,.2)}',
     '.pv-lbl{font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#c08090;margin-bottom:5px}',
     '.pv-hint{font-size:11px;color:#b09aa3;line-height:1.5}',
@@ -2759,15 +2778,21 @@ function css(){
     '.pv-link[hidden]{display:none}',
     // дорожки программы
     '.pv-pal .pv-tab{flex:0 0 auto;padding:7px 10px}',
-    '.pv-lane{display:flex;align-items:center;gap:6px;margin-top:8px}',
-    '.pv-lanenm{width:56px;flex:none;font-size:10px;color:#c08090}',
-    '.pv-tape{flex:1;display:flex;gap:3px;height:40px;padding:3px;border-radius:11px;background:#0f090c;border:1px solid rgba(200,100,120,.15);overflow:hidden;min-width:0}',
-    '.pv-tapeempty{margin:auto;font-size:11px;color:#a08088}',
-    '.pv-blk{flex:none;min-width:34px;border-radius:8px;padding:0 6px;display:flex;flex-direction:column;justify-content:center;overflow:hidden;cursor:pointer;',
+    '.pv-lane{margin-top:10px;padding:8px;border-radius:12px;background:#0f090c;border:1px solid rgba(200,100,120,.15)}',
+    '.pv-lanehead{display:flex;justify-content:space-between;font-size:10px;color:#c08090;margin-bottom:5px}',
+    '.pv-lanehead span:last-child{color:#a08088}',
+    '.pv-shape{display:flex;gap:2px;height:5px;margin-bottom:7px;border-radius:3px;overflow:hidden;background:rgba(200,100,120,.06)}',
+    '.pv-shape i{display:block;height:100%;border-radius:2px;background:rgba(200,100,120,var(--a,.6))}',
+    '.pv-shape i.quiet{background:rgba(255,255,255,.1)}',
+    '.pv-shape i.sel{background:#fff}',
+    '.pv-chiprow{display:flex;flex-wrap:wrap;gap:5px}',
+    '.pv-tapeempty{font-size:11px;color:#a08088;padding:4px 2px}',
+    '.pv-blk{flex:0 0 auto;max-width:100%;border-radius:9px;padding:5px 9px 5px 7px;display:flex;flex-direction:column;cursor:pointer;',
       'background:rgba(200,100,120,var(--a,.6));color:#fff;white-space:nowrap}',
     '.pv-blk.quiet{background:rgba(255,255,255,.07);color:#c8a0aa}',
-    '.pv-blk b{font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis}',
-    '.pv-blk small{font-size:10px;color:#ffe0e6;opacity:.85;overflow:hidden;text-overflow:ellipsis}',
+    '.pv-blk b{font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px}',
+    '.pv-blk b u{text-decoration:none;font-size:9px;min-width:14px;height:14px;border-radius:7px;background:rgba(0,0,0,.25);display:inline-flex;align-items:center;justify-content:center}',
+    '.pv-blk small{font-size:10px;color:#ffe0e6;opacity:.85;margin-left:19px}',
     '.pv-blk.sel{outline:1.5px solid #fff;outline-offset:-1px}',
     '.pv-lanepick{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px;color:#b09aa3}',
     '.pv-lanepick .pv-tab{flex:0 0 auto;padding:6px 12px}',
@@ -4757,10 +4782,70 @@ function openWin(){
     paintTabs(); paintBrains(); paintProfiles(); paintFetish(); paintLanes(); paintPat(); paintGraph();
     paintStatus(); paintMeter(); paintLog(); paintGate();
     paintStrips(true);
+    wireWinDrag(); placeWin();
   }
 }
 
 function closeWin(){ var w = el('pv-win'); if (w) w.classList.remove('on'); }
+
+/* Окно пульта можно перетащить за шапку — в Таверне и в Таво на компьютере.
+   На телефоне оно и так во весь экран, а шапку там легко задеть пальцем. Место
+   запоминается; двойной щелчок по шапке возвращает окно на место. */
+function winDragOn(){ return НА_СТ || плат() === 'desktop'; }
+
+function placeWin(){
+  var card = el('pv-card'); if (!card) return;
+  var pos = winDragOn() ? lsGet('pv_winpos', null) : null;
+  card.style.transform = '';
+  if (!pos) return;
+  var r = card.getBoundingClientRect();
+  if (!r.width) return;
+  var W = pwin.innerWidth || 800, H = pwin.innerHeight || 600;
+  // окно целиком остаётся на экране: подвинули его и сменили размер окна браузера — не теряем
+  var x = clamp(pos.x, -r.left + 4, W - r.right - 4);
+  var y = clamp(pos.y, -r.top + 4, H - r.bottom - 4);
+  card.style.transform = 'translate(' + Math.round(x) + 'px,' + Math.round(y) + 'px)';
+}
+
+function resetWin(){
+  try { store && store.removeItem('pv_winpos'); } catch(e){}
+  placeWin();
+}
+PV.resetWin = resetWin;
+
+function wireWinDrag(){
+  var card = el('pv-card'), head = card && card.querySelector('.pv-head');
+  if (!head || head._drag) return;
+  head._drag = 1;
+  if (winDragOn()) head.classList.add('pv-movable');
+  var on = false, sx = 0, sy = 0, ox = 0, oy = 0;
+  head.addEventListener('pointerdown', function(e){
+    if (!winDragOn() || e.button > 0) return;
+    if (e.target.closest && e.target.closest('button,.pv-tg,.pv-power')) return;   // кнопки жмутся как обычно
+    var pos = lsGet('pv_winpos', null) || { x: 0, y: 0 };
+    on = true; sx = e.clientX; sy = e.clientY; ox = pos.x; oy = pos.y;
+    try { head.setPointerCapture(e.pointerId); } catch(_){}
+    e.preventDefault();
+  });
+  head.addEventListener('pointermove', function(e){
+    if (!on) return;
+    lsSet('pv_winpos', { x: ox + e.clientX - sx, y: oy + e.clientY - sy });
+    placeWin();
+  });
+  var up = function(){
+    if (!on) return; on = false;
+    // запоминаем то, что реально на экране, а не то, куда тянули за край
+    var card2 = el('pv-card'), m = /translate\((-?\d+)px,\s*(-?\d+)px\)/.exec(card2 && card2.style.transform || '');
+    if (m) lsSet('pv_winpos', { x: +m[1], y: +m[2] });
+  };
+  head.addEventListener('pointerup', up);
+  head.addEventListener('pointercancel', up);
+  head.addEventListener('dblclick', function(e){
+    if (!winDragOn() || (e.target.closest && e.target.closest('button,.pv-tg,.pv-power'))) return;
+    resetWin();
+  });
+  try { pwin.addEventListener('resize', placeWin); } catch(e){}
+}
 try { pdoc.addEventListener('visibilitychange', function(){ if (!pdoc.hidden) startWaves(); }); } catch(e){}
 PV.open = openWin;
 PV.readNow = function(){ clearTimeout(msgTimer); return readLast(); };

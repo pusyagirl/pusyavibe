@@ -93,12 +93,14 @@ function applyInsets() {
 
 const переходник = {
     message: {
-        find: async () => (ctx().chat || []).map((m, i) => ({
-            id: i,
+        // Пульту нужен хвост чата: последнее сообщение и немного истории для «из чата».
+        // Весь чат на каждый токен потока — лишняя работа на длинных переписках.
+        find: async () => { const all = ctx().chat || [], от = Math.max(0, all.length - 60); return all.slice(от).map((m, k) => ({
+            id: от + k,
             role: m.is_user ? 'user' : (m.is_system ? 'system' : 'assistant'),
             content: String(m.mes || ''),
             name: m.name,
-        })),
+        })); },
     },
     chat: {
         current: async () => {
@@ -211,6 +213,10 @@ const DRAWER = `
         <button class="pvx-b" id="pvx_open">Открыть пульт ≋</button>
         <button class="pvx-b pvx-ghost" id="pvx_dock">Вернуть кнопку ≋ на место</button>
       </div>
+      <div class="pvx-row" style="margin-top:0">
+        <button class="pvx-b pvx-ghost" id="pvx_win">Вернуть окно пульта на место</button>
+      </div>
+      <div class="pvx-hint">окно пульта можно таскать за шапку; двойной щелчок по шапке — тоже вернуть на место</div>
       <div class="pvx-hint pvx-foot">Пуся · <a href="https://t.me/pusgir" target="_blank">t.me/pusgir</a></div>
     </div>
   </div>
@@ -230,6 +236,7 @@ function mountDrawer() {
     $('#pvx_max').val(String(h.maxMinutes)).on('change', function () { h.maxMinutes = +$(this).val(); save(); });
     $('#pvx_safe').val(h.safeword).on('input', function () { h.safeword = $(this).val(); save(); });
     $('#pvx_open').on('click', () => fire('pusya-open-vibe'));
+    $('#pvx_win').on('click', () => { try { window.PV?.resetWin?.(); } catch { /* ещё не загрузилась */ } });
     $('#pvx_dock').on('click', () => {
         try { window.PV?.resetDock?.(); } catch { /* ещё не загрузилась */ }
     });
