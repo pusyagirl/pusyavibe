@@ -1192,6 +1192,7 @@ function buildPrompt(ход){
   var куски = [toyPrompt(ход), fetishPrompt(), режиссёр || pacePrompt()].filter(Boolean);
   var p = куски.join('\n\n');
   try { pwin.__pv_prompt = p; window.__pv_prompt = p; } catch(e){}
+  PEEK.main = p; PEEK.mainAt = now(); paintPeek();
   try { var хук = window.__pv_onPrompt || (pwin && pwin.__pv_onPrompt); if (хук) хук(p); } catch(e){}
 }
 
@@ -1203,7 +1204,8 @@ function сценаГорячая(){
 }
 
 function кемЗовут(){
-  return (NAMES.user && NAMES.user !== 'ты') ? NAMES.user : 'пользователя';
+  // имя в начальной форме: склонять чужие имена плагин не умеет
+  return (NAMES.user && NAMES.user !== 'ты') ? NAMES.user : 'пользователь';
 }
 
 /* ═══════════════ паспорт игрушки для персонажа ═══════════════ */
@@ -1225,7 +1227,7 @@ function toyPrompt(ход){
     return t ? t + ' (' + p.name + ')' : p.name;
   });
   return '[Игрушка]\n' +
-    'У ' + кемЗовут() + ' сейчас подключена настоящая игрушка: ' + описания.join('; ') + '. ' +
+    кемЗовут() + ' сейчас с настоящей игрушкой: ' + описания.join('; ') + '. ' +
     'Умеет: ' + caps.brief + '.\n' +
     'Если игрушка появляется в сцене — описывай именно такую, с её формой и ощущениями. ' +
     'Не вводи её сам, если сцена к этому не ведёт.\n' +
@@ -1250,6 +1252,19 @@ function takeHint(reply){
   if (!m) return '';
   // Это уйдёт в промпт основной модели — только обычный текст, коротко.
   return m[1].replace(/<[^>]*>/g, ' ').replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 280);
+}
+
+/* Что уходит моделям — видно в Настройках → «Кто ведёт сцену» → «что уходит моделям».
+   Только для глаз: наружу это не отправляется. */
+var PEEK = { main: '', mainAt: 0, ask: '', out: '', at: 0 };
+function paintPeek(){
+  var d = el('pv-peek'); if (!d || !d.open) return;
+  var hh = function(t){ return t ? new Date(t).toTimeString().slice(0, 5) : ''; };
+  var m = el('pv-peek-main'), a = el('pv-peek-ask'), o = el('pv-peek-out'), w = el('pv-peek-when');
+  if (m) m.textContent = PEEK.main || (host().aiControl ? 'сейчас ничего — сцена спокойная или напоминать нечего' : 'ничего: рубильник «Разрешить ИИ управлять» выключен');
+  if (a) a.textContent = PEEK.ask || (C.brain === 'model' ? 'ещё не спрашивала' : 'вторая модель выключена — сцену ведут слова');
+  if (o) o.textContent = PEEK.out || '—';
+  if (w) w.textContent = (PEEK.mainAt ? 'основной — обновлено в ' + hh(PEEK.mainAt) : '') + (PEEK.at ? ' · второй — в ' + hh(PEEK.at) : '');
 }
 
 /* ═══════════════ темп близкой сцены ═══════════════ */
@@ -1843,8 +1858,11 @@ function runBrain(key, text){
 
   brainBusy = true;
   log('brain', 'читаю сцену…');
-  genAsk(analystInput(plain), analystSys()).then(function(reply){
+  var запрос = analystInput(plain);
+  PEEK.ask = запрос; PEEK.out = '…жду ответ'; PEEK.at = now(); paintPeek();
+  genAsk(запрос, analystSys()).then(function(reply){
     brainBusy = false;
+    PEEK.out = String(reply || '').trim() || '(пусто)'; paintPeek();
     if (C.hintOn){
       var подсказка = takeHint(reply);
       if (подсказка){
@@ -2861,6 +2879,7 @@ function css(){
     '.pv-log .pv-logerr{color:#f0a8a0}',
     '.pv-log b{color:#c08090;font-weight:600}',
     '.pv-more{margin-top:6px}',
+    '.pv-pre{margin:3px 0 6px;padding:7px 8px;border-radius:9px;background:#0f090c;border:1px solid rgba(200,100,120,.15);color:#e0c8cf;font:10.5px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto}',
     '.pv-more summary{cursor:pointer;font-size:11px;color:#c08090;padding:4px 0;list-style:none}',
     '.pv-more summary::-webkit-details-marker{display:none}',
     '.pv-more summary:before{content:"▸ ";opacity:.7}',
@@ -3150,6 +3169,12 @@ function buildWin(){
       '<div class="pv-swrow" style="margin-top:10px"><div class="pv-sw"><span>Слушаться персонажа</span><div class="pv-tg" id="pv-tg-orders"><i></i></div></div><div class="pv-hint">сказал «сильнее» — станет сильнее, «замри» — тишина. А если в сцене он берёт игрушку и включает её на максимум — включится настоящая</div></div>' +
       '<div class="pv-swrow"><div class="pv-sw"><span>Не торопить сцену</span><div class="pv-tg" id="pv-tg-pace"><i></i></div></div><div class="pv-hint">просит модель вести близость ступенями и не сводить её к трём строчкам</div></div>' +
       '<div class="pv-swrow"><div class="pv-sw"><span>Рассказать персонажу про игрушку</span><div class="pv-tg" id="pv-tg-toytell"><i></i></div></div><div class="pv-hint">какая она и какими словами её включать — тогда в сцене будет именно твоя игрушка, и персонаж сможет ею управлять</div></div>' +
+      '<details class="pv-more" id="pv-peek"><summary>что уходит моделям</summary>' +
+        '<div class="pv-hint" id="pv-peek-when"></div>' +
+        '<div class="pv-pick">основной модели — перед каждым ответом</div><pre class="pv-pre" id="pv-peek-main"></pre>' +
+        '<div class="pv-pick">второй модели — последний запрос (твоё сообщение и ответ персонажа)</div><pre class="pv-pre" id="pv-peek-ask"></pre>' +
+        '<div class="pv-pick">её ответ</div><pre class="pv-pre" id="pv-peek-out"></pre>' +
+      '</details>' +
       '</div>' +
 
       // Характер целиком: кнопки профиля дублируют «Сейчас», ручки — только здесь.
@@ -3290,6 +3315,7 @@ function buildWin(){
   tg('pv-tg-fetdrive', function(){ return !!C.fetDrive; }, function(v){ C.fetDrive = v; saveCfg(); return true; });
   tg('pv-tg-orders', function(){ return !!C.orders; }, function(v){ C.orders = v; saveCfg(); return true; });
   tg('pv-tg-pace', function(){ return !!C.paceHint; }, function(v){ C.paceHint = v; saveCfg(); buildPrompt(); return true; });
+  var pk = el('pv-peek'); if (pk) pk.addEventListener('toggle', paintPeek);
   tg('pv-tg-toytell', function(){ return !!C.toyTell; }, function(v){ C.toyTell = v; toyToldAt = 0; saveCfg(); buildPrompt(); return true; });
   tg('pv-tg-perchat', function(){ return !!C.perChat; }, function(v){
     C.perChat = v; saveCfg();
