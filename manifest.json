@@ -5,7 +5,9 @@
     "optional": [],
     "js": "index.js",
     "css": "style.css",
+    "generate_interceptor": "pusyaVibeBeforeGenerate",
     "author": "PUSYA · t.me/pusgir",
-    "version": "1.13.0",
-    "homePage": "https://t.me/pusgir"
+    "version": "1.14.0",
+    "homePage": "https://t.me/pusgir",
+    "auto_update": true
 }
