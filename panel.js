@@ -100,7 +100,7 @@ var DEF = {
   brain: 'live',
   ep: '', key: '', model: '',            // свой OpenAI-совместимый эндпоинт для аналитика
   keepAwake: true,                       // не давать экрану гаснуть, пока идёт сцена
-  bgKeep: false,                         // не глушить при сворачивании приложения
+  bgKeep: true,                          // не глушить при сворачивании приложения
   tab: 'home',                          // открытая вкладка пульта
   gain: 1,                               // усиление того, что назначили теги/аналитик/эвристика
   gate: true,                            // не тратить запрос аналитика на спокойные сцены
@@ -132,6 +132,11 @@ function queueToLanes(bag){
 }
 queueToLanes(C);
 delete C.queue;
+/* Раньше плагин глушил игрушку, едва свернёшь приложение, и включено это было
+   по умолчанию. В сцене это читается как обрыв: ответ ещё пишется, а игрушка
+   уже замолчала. Теперь наоборот — один раз переставляем и у тех, кто ставил
+   плагин раньше. Выключить обратно можно там же, в «Поведении». */
+if (!C.bgFix2){ C.bgKeep = true; C.bgFix2 = 1; }
 for (var k in DEF) if (C[k] === undefined) C[k] = DEF[k];
 /* Где всё лежит.
 
@@ -194,7 +199,7 @@ function loadCfgFromTavo(){
    поэтому уходит только «vibe, anon, версия» — ни ника, ни настроек, ни
    предпочтений, ни названия игрушки. На стенде без Таво не стучимся, чтобы
    проверки не считались живыми людьми. */
-var PV_VERSION = '1.14.0';
+var PV_VERSION = '1.14.1';
 (function(){
   function beat(){
     if (!TV()) return;
@@ -428,6 +433,12 @@ DRV.intiface = {
       log('dev', имя + ' — это заглушка Intiface, отключила её');
     }
     if (прежняя) return;                  // это просто «грелка» канала, дальше делать нечего
+    // Что игрушка вообще умеет, по словам самого Intiface. Если тут пусто — мотор
+    // не распознан, и дело не в плагине: такая игрушка молчит и в самом Intiface.
+    var умеет = this.devices[d.DeviceIndex].scalars.map(function(f){ return f.type; });
+    if (this.devices[d.DeviceIndex].rotate) умеет.push('Rotate');
+    if (this.devices[d.DeviceIndex].linear) умеет.push('Linear');
+    log('dev', имя + ' умеет: ' + (умеет.join(', ') || 'ничего — Intiface не нашёл у неё мотор'));
     toyToldAt = 0;          // новая игрушка — в ближайшем ответе расскажем про неё
     buildPrompt();          // персонаж должен узнать, что именно к нему подключилось
     this.askBattery();
@@ -662,7 +673,7 @@ function capLevel(){ return clamp(host().capLevel, 0, 20); }
    (моторы идут раздельно). Иначе второй мотор, как и раньше, повторяет вибрацию. */
 var КАН = ['v','r','p','s','t','w'];
 
-function clearProg(){ E.prog = []; E.i = 0; E.stepEnd = 0; E.mine = false; }
+function clearProg(){ E.prog = []; E.i = 0; E.stepEnd = 0; E.mine = false; E.noSmooth = false; }
 
 function activeLevels(){
   var o = { v: 0, r: 0, p: 0, s: 0, t: 0, w: 0 };
@@ -789,10 +800,17 @@ function engineTick(){
       var k = 0.88 + 0.12 * (0.5 + 0.5 * Math.sin(waited / 4200));   // ±12% за ~26 секунд
       КАН.forEach(function(c){ out[c] *= k; });
     }
-    // Совсем пусто — держим затишье, чтобы пауза не была мёртвой.
-    if (C.idleLevel > 0 && !E.manual && out.v + out.r + out.p + out.s + out.t < 0.5){
-      out[mainChannel()] = C.idleLevel;
-    }
+  }
+
+  /* Затишье «между сценами». Раньше оно жило только в ожидании ответа, и пауза
+     между двумя ответами всё равно оставалась мёртвой — её и приняли за зависание.
+     Теперь фон держится в любой паузе: сцена кончилась, модель думает, ты читаешь.
+     Молчание нарочное — отказ на пике, стоп-слово, «выключил в сцене» — не трогаем. */
+  if (C.idleLevel > 0 && !E.manual && !E.mine && E.aiOn && host().aiControl &&
+      t >= E.lockUntil && !(E.devHold && t < E.devHold) &&
+      !(E.denyUntil && t < E.denyUntil) && !(E.pauseUntil && t < E.pauseUntil) &&
+      out.v + out.r + out.p + out.s + out.t < 0.5){
+    out[mainChannel()] = C.idleLevel;
   }
 
   // Мягкий вход после подключения: за две секунды поднимаемся с нуля до нужного,
@@ -805,7 +823,7 @@ function engineTick(){
   КАН.forEach(function(c){ out[c] = clamp(out[c], 0, cap); });
 
   // Плавность: уровень идёт к цели шагами, а не прыжком. 0 — как было, мгновенно.
-  var soft = clamp(C.smooth || 0, 0, 100);
+  var soft = E.noSmooth ? 0 : clamp(C.smooth || 0, 0, 100);
   if (soft > 0){
     var rate = cap / (1 + soft / 12);            // сколько единиц можно пройти за такт
     КАН.forEach(function(c){
@@ -840,6 +858,7 @@ function engineTick(){
   // и роняет соединение, если сыпать командами каждые 250 мс. Промежуточные
   // значения просто пропускаем — следующий такт отправит то, что накопилось.
   var minGap = D && D.id === 'phone' ? 0 : (C.gentle || fragileToy() ? 1000 : 380);
+  if (E.noSmooth) minGap = Math.min(minGap, 250);   // проверка короткая, захлебнуться нечем
   var gapOk = (t - E.lastSendAt) >= minGap;
   var quietNow = !any;                       // тишину шлём сразу, без задержек
 
@@ -859,6 +878,11 @@ function engineTick(){
     // На «грелке» шлём обычную команду с нулями, а не Stop: Stop у части прошивок
     // означает «разговор окончен», и следом игрушка засыпает.
     try { (any || тепло) ? D.send(out, only) : D.stop(); } catch(e){}
+    // Тестеру важно знать, что панель правда шлёт команды, а тишина — не её вина.
+    if (any && t - (E.sentLog || 0) > 60000){
+      E.sentLog = t;
+      log('dev', 'команды уходят: ' + Math.round(Math.max(out.v, out.r, out.p, out.s, out.t, out.d ? out.w : 0)) + '/20 → ' + (D.info || D.label));
+    }
   }
   // «сессия» = отрезок работы; паузы внутри паттерна её не сбрасывают,
   // счётчик автостопа обнуляет только 20 секунд настоящей тишины
@@ -870,6 +894,34 @@ function engineTick(){
 
 function startEngine(){ if (!E.tick) E.tick = setInterval(engineTick, 250); wakeLockOn(); }
 function stopEngine(){ if (E.tick) { clearInterval(E.tick); E.tick = null; } }
+
+/* Проверка связи: три коротких толчка и тишина, всё вместе — три секунды.
+   Ровный гул на три секунды тестеры принимали за «игрушка не выключается»,
+   да и по нему не понять, доходят команды по очереди или одна залипла.
+   Программа играет точно: без сглаживания, без своеволия и без повтора,
+   а сторожевой таймер глушит её, даже если что-то пойдёт не так. */
+var testTimer = null;
+
+function runTest(){
+  if (!D || D.state !== 'on'){ toast('сначала подключись'); return; }
+  var top = clamp(Math.min(12, capLevel()), 1, 20), шаги = [];
+  // полсекунды толчок, полсекунды тишина, три раза — ровно три секунды
+  for (var i = 0; i < 3; i++){
+    шаги.push(step({ v: top }, 0.5));
+    шаги.push(step({ v: 0 }, 0.5));
+  }
+  playProgram(шаги, 0, { exact: true, mine: true, loop: false, raw: true });
+  clearTimeout(testTimer);
+  testTimer = setTimeout(function(){
+    if (!E.mine) return;                       // уже играет что-то другое — не мешаем
+    clearProg();
+    E.smooth = { v: 0, r: 0, p: 0, s: 0, t: 0, w: 0 };
+    E.lastOut = '';
+    try { if (D) D.stop(); } catch(e){}
+    paintMeter();
+  }, 3300);
+  log('test', 'тест: три коротких толчка по ' + top + '/20 — три секунды');
+}
 
 function playProgram(steps, fromIdx, opts){
   if (!steps || !steps.length) return;
@@ -891,6 +943,8 @@ function playProgram(steps, fromIdx, opts){
   E.mine = !!(opts && opts.mine);
   // Своя петля для этой программы. null — значит «как настроено для сцен».
   E.progLoop = (opts && opts.loop != null) ? !!opts.loop : null;
+  // Точная проверка: уровень ставим как есть, иначе сглаживание съедает короткие толчки.
+  E.noSmooth = !!(opts && opts.raw);
   E.denyUntil = 0;
   onStepStart(steps[E.i]);
   startEngine();
@@ -962,7 +1016,7 @@ function onHide(){
   E.hidAt = now();
   if (C.bgKeep){
     // Уровень останется последним: система замораживает таймеры, программа дальше не идёт.
-    log('bg', 'ушла в фон — уровень замер на ' + Math.round(E.live.v) + '/20');
+    log('bg', 'ушли в фон — держу ' + Math.round(Math.max(E.live.v, E.live.w || 0)) + '/20 до возвращения');
     return;
   }
   // Железо глушим сразу, но сцену не стираем: вернёшься — доиграет с того же места.
@@ -2652,9 +2706,14 @@ function css(){
       'bottom:calc(var(--tavo-inset-bottom-input, 66px) + 8px);',
       'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
     '#pv-win.on{display:flex;align-items:flex-end;justify-content:center;padding:0 10px}',
-    '#pv-card{pointer-events:auto;width:100%;max-width:400px;height:100%;max-height:620px;display:flex;flex-direction:column;',
+    '#pv-card{pointer-events:auto;position:relative;width:100%;max-width:var(--pv-cw,400px);height:100%;max-height:var(--pv-ch,620px);display:flex;flex-direction:column;',
       'background:linear-gradient(160deg,#1a1015,#120a0e);border:1px solid rgba(200,100,120,.35);',
       'border-radius:20px;box-shadow:0 10px 30px rgba(0,0,0,.6);padding:14px 14px 8px;color:#e0c0c0;font-size:12px;line-height:1.45}',
+    // уголок для растягивания: только там, где есть мышь
+    '#pv-grip{position:absolute;right:2px;bottom:2px;width:20px;height:20px;cursor:nwse-resize;touch-action:none;',
+      'border-right:2px solid rgba(200,100,120,.5);border-bottom:2px solid rgba(200,100,120,.5);border-radius:0 0 18px 0;opacity:.45}',
+    '#pv-grip:hover{opacity:1}',
+    '#pv-grip[hidden]{display:none}',
     '#pv-body{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;margin:0 -2px;padding:0 2px}',
     '#pv-body::-webkit-scrollbar{width:3px}#pv-body::-webkit-scrollbar-thumb{background:rgba(200,100,120,.3);border-radius:3px}',
 
@@ -3202,7 +3261,7 @@ function buildWin(){
       '<div class="pv-swrow"><div class="pv-sw"><span>Отклик на мои сообщения</span><div class="pv-tg" id="pv-tg-reply"><i></i></div></div><div class="pv-hint">короткая вставка, пока модель думает</div></div>' +
       '<div class="pv-swrow"><div class="pv-sw"><span>Повторять до ответа</span><div class="pv-tg" id="pv-tg-loop"><i></i></div></div><div class="pv-hint">программа играет по кругу</div></div>' +
       '<div class="pv-swrow"><div class="pv-sw"><span>Не гасить экран</span><div class="pv-tg" id="pv-tg-awake"><i></i></div></div><div class="pv-hint">иначе система усыпит ' + ХОСТ.имя + ' вместе с плагином</div></div>' +
-      '<div class="pv-swrow"><div class="pv-sw"><span>Не глушить при сворачивании</span><div class="pv-tg" id="pv-tg-bg"><i></i></div></div><div class="pv-hint">уровень замрёт и дождётся возвращения</div></div>' +
+      '<div class="pv-swrow"><div class="pv-sw"><span>Работать, когда сворачиваю</span><div class="pv-tg" id="pv-tg-bg"><i></i></div></div><div class="pv-hint">игрушка держит уровень, пока тебя нет в ' + ХОСТ.имя + '; выключишь — замолкает сразу</div></div>' +
       '<div class="pv-swrow"><div class="pv-sw"><span>Запомнить для этого чата</span><div class="pv-tg" id="pv-tg-perchat"><i></i></div></div><div class="pv-hint" id="pv-chat-note">с одним персонажем жёстче, с другим нежнее</div></div>' +
         '<details class="pv-more"><summary>тонкая настройка</summary>' +
           '<div class="pv-pick" style="margin-top:8px">переходы между уровнями</div>' +
@@ -3210,7 +3269,7 @@ function buildWin(){
           '<div class="pv-hint">резко — уровень прыгает сразу, мягко — плавно доезжает за секунду</div>' +
           '<div class="pv-pick">между сценами</div>' +
           '<div class="pv-tabs" id="pv-idle"></div>' +
-          '<div class="pv-hint">играть нечего — полная тишина или еле заметный фон</div>' +
+          '<div class="pv-hint">играть нечего — полная тишина или еле заметный фон; он держится и в паузах между ответами</div>' +
           '<div class="pv-sw"><span>Дышать, пока модель думает</span><div class="pv-tg" id="pv-tg-breathe"><i></i></div></div>' +
           '<div class="pv-sw"><span>Глушить, когда пишу я</span><div class="pv-tg" id="pv-tg-user"><i></i></div></div>' +
           '<div class="pv-row" style="margin-top:8px">' +
@@ -3234,6 +3293,7 @@ function buildWin(){
 
     '</div>' +
     '<div class="pv-foot">Пуся · t.me/pusgir</div>' +
+    '<div id="pv-grip" hidden title="потянуть — изменить размер, двойной щелчок — вернуть"></div>' +
   '</div>';
   (pdoc.body || pdoc.documentElement).appendChild(w);
 
@@ -3279,12 +3339,7 @@ function buildWin(){
   var tr = el('pv-tour-again');
   if (tr) tr.addEventListener('click', function(){ startTour(); });
 
-  el('pv-test').addEventListener('click', function(){
-    if (!D || D.state !== 'on') { toast('сначала подключись'); return; }
-    var top = Math.min(12, capLevel());
-    playProgram([step({ v: 3, to: { v: top } }, 2), step({ v: top }, 1), step({ v: 0 }, 0.3)], 0, { exact: true, mine: true });
-    log('test', 'тест 3 сек');
-  });
+  el('pv-test').addEventListener('click', runTest);
 
   tg('pv-tg-ai', function(){ return E.aiOn; }, function(v){
     if (v && !host().aiControl){ toast('включи «Разрешить ИИ управлять» в настройках плагина'); return false; }
@@ -3965,7 +4020,7 @@ var WIZ = [
     body: function(){
       return '<div class="pv-wz-lead">Короткий тест: игрушка должна плавно раскрутиться и затихнуть.</div>' +
         '<div class="pv-row" style="margin-top:10px">' +
-          '<button class="pv-b" data-wz="test" style="flex:1">Тест 3 секунды</button>' +
+          '<button class="pv-b" data-wz="test" style="flex:1">Проверить — три толчка</button>' +
         '</div>' +
         '<div class="pv-wz-note">Тихо? Потяни ползунок в самом Intiface. Не вибрирует и там — дело в игрушке: заряд, сон или родное приложение всё ещё держит её.</div>';
     }
@@ -4068,13 +4123,7 @@ function wizDo(что, кнопка){
     });
     return;
   }
-  if (что === 'test'){
-    if (!D || D.state !== 'on'){ toast('сначала подключись'); return; }
-    var top = Math.min(12, capLevel());
-    playProgram([step({ v: 3, to: { v: top } }, 2), step({ v: top }, 1), step({ v: 0 }, 0.3)], 0, { exact: true, mine: true });
-    log('test', 'тест 3 сек');
-    return;
-  }
+  if (что === 'test'){ runTest(); return; }
   if (что === 'addr'){
     wizFinish(false);
     showTab('set');
@@ -4761,12 +4810,14 @@ function paintGraph(){
   // Отказ на пике — это тишина нарочно. Без подписи она читается как поломка,
   // поэтому говорим прямо, что происходит.
   if (ss) ss.textContent = (E.denyUntil && now() < E.denyUntil) ? 'дразнит — тишина'
+    : (E.devHold && now() < E.devHold) ? 'в сцене её выключили'
+    : E.paused ? 'свернули — пауза'
     : E.mine ? 'ведёшь ты'
-    : !живые.length ? 'тихо'
+    : E.manual > 0 ? 'вручную'
     : E.waiting ? 'ждём ответ'
     : E.overlay ? 'отклик'
-    : E.manual > 0 ? 'вручную'
-    : E.prog.length ? 'идёт сцена' : 'тихо';
+    : E.prog.length ? 'идёт сцена'
+    : (E.aiOn && host().aiControl) ? 'сцена кончилась — жду ответ' : 'тихо';
 }
 
 var lastPaint = 0;
@@ -4808,7 +4859,7 @@ function openWin(){
     paintTabs(); paintBrains(); paintProfiles(); paintFetish(); paintLanes(); paintPat(); paintGraph();
     paintStatus(); paintMeter(); paintLog(); paintGate();
     paintStrips(true);
-    wireWinDrag(); placeWin();
+    wireWinDrag(); sizeWin(); placeWin();
   }
 }
 
@@ -4833,9 +4884,29 @@ function placeWin(){
   card.style.transform = 'translate(' + Math.round(x) + 'px,' + Math.round(y) + 'px)';
 }
 
+/* Размер окна. На телефоне он один и тот же — панель и так во весь экран.
+   На компьютере и в Таверне места куда больше, поэтому окно сразу шире и выше,
+   а уголок внизу справа тянется мышью. Размер запоминается. */
+var РАЗМЕР = { w: 520, h: 780 };
+
+function sizeWin(){
+  var card = el('pv-card'); if (!card) return;
+  var g = el('pv-grip'); if (g) g.hidden = !winDragOn();
+  if (!winDragOn()){
+    try { card.style.removeProperty('--pv-cw'); card.style.removeProperty('--pv-ch'); } catch(e){}
+    return;
+  }
+  var s = lsGet('pv_winsize', null) || РАЗМЕР;
+  var W = pwin.innerWidth || 900, H = pwin.innerHeight || 700;
+  // не даём утащить окно за пределы экрана: по краям всегда остаётся полоска чата
+  var w = Math.round(clamp(+s.w || РАЗМЕР.w, 340, Math.max(340, W - 24)));
+  var h = Math.round(clamp(+s.h || РАЗМЕР.h, 380, Math.max(380, H - 24)));
+  try { card.style.setProperty('--pv-cw', w + 'px'); card.style.setProperty('--pv-ch', h + 'px'); } catch(e){}
+}
+
 function resetWin(){
-  try { store && store.removeItem('pv_winpos'); } catch(e){}
-  placeWin();
+  try { store && store.removeItem('pv_winpos'); store && store.removeItem('pv_winsize'); } catch(e){}
+  placeWin(); sizeWin();
 }
 PV.resetWin = resetWin;
 
@@ -4870,7 +4941,41 @@ function wireWinDrag(){
     if (!winDragOn() || (e.target.closest && e.target.closest('button,.pv-tg,.pv-power'))) return;
     resetWin();
   });
-  try { pwin.addEventListener('resize', placeWin); } catch(e){}
+  wireGrip();
+  try { pwin.addEventListener('resize', function(){ sizeWin(); placeWin(); }); } catch(e){}
+}
+
+function wireGrip(){
+  var g = el('pv-grip'); if (!g || g._drag) return;
+  g._drag = 1;
+  var on = false, sx = 0, sy = 0, w0 = 0, h0 = 0;
+  g.addEventListener('pointerdown', function(e){
+    if (!winDragOn() || e.button > 0) return;
+    var card = el('pv-card'); if (!card) return;
+    var r = card.getBoundingClientRect();
+    on = true; sx = e.clientX; sy = e.clientY; w0 = r.width; h0 = r.height;
+    try { g.setPointerCapture(e.pointerId); } catch(_){}
+    e.preventDefault(); e.stopPropagation();
+  });
+  g.addEventListener('pointermove', function(e){
+    if (!on) return;
+    lsSet('pv_winsize', { w: w0 + (e.clientX - sx), h: h0 + (e.clientY - sy) });
+    sizeWin(); placeWin();
+  });
+  var up = function(){
+    if (!on) return; on = false;
+    // запоминаем то, что реально получилось, а не то, куда тянули за край экрана
+    var card = el('pv-card'); if (!card) return;
+    var r = card.getBoundingClientRect();
+    lsSet('pv_winsize', { w: Math.round(r.width), h: Math.round(r.height) });
+  };
+  g.addEventListener('pointerup', up);
+  g.addEventListener('pointercancel', up);
+  g.addEventListener('dblclick', function(e){
+    e.stopPropagation();
+    try { store && store.removeItem('pv_winsize'); } catch(_){}
+    sizeWin(); placeWin();
+  });
 }
 try { pdoc.addEventListener('visibilitychange', function(){ if (!pdoc.hidden) startWaves(); }); } catch(e){}
 PV.open = openWin;
