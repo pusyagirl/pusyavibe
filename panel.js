@@ -199,7 +199,7 @@ function loadCfgFromTavo(){
    поэтому уходит только «vibe, anon, версия» — ни ника, ни настроек, ни
    предпочтений, ни названия игрушки. На стенде без Таво не стучимся, чтобы
    проверки не считались живыми людьми. */
-var PV_VERSION = '1.14.1';
+var PV_VERSION = '1.14.2';
 (function(){
   function beat(){
     if (!TV()) return;
@@ -274,6 +274,13 @@ DRV.phone = {
   stop: function(){ try { navigator.vibrate(0); } catch(e){} }
 };
 
+/* Intiface пускает к себе только одного клиента. Пока он занят — вторая панель,
+   открытая где-то ещё (другой чат, Таверна, проверочный стенд), просто не
+   достучится, и выглядит это как «игрушка не работает». Сам Intiface при этом
+   перестаёт слушать порт, так что дело не в адресе. Пишем об этом в журнале —
+   иначе искать можно долго. */
+var ОДИН_КЛИЕНТ = '. Intiface пускает только одного: закрой пульт в других чатах и окнах';
+
 /* ── Intiface Central / Buttplug v3: универсально, ~100 брендов ── */
 DRV.intiface = {
   id: 'intiface', label: 'Intiface — любой бренд',
@@ -292,7 +299,7 @@ DRV.intiface = {
         if (!done){
           done = true; self.state = 'error';
           self.info = url + ' не ответил за 6 секунд — включён ли сервер в Intiface?';
-          log('err', url + ' молчит 6 секунд');
+          log('err', url + ' молчит 6 секунд' + ОДИН_КЛИЕНТ);
           try { ws.close(); } catch(e){}
           res(false);
         }
@@ -389,7 +396,7 @@ DRV.intiface = {
           done = true; clearTimeout(giveUp); self.state = 'error';
           // Показываем адрес: чаще всего в поле стоит не то, что ждёт Intiface.
           self.info = 'не достучалась до ' + url + ' — запущен ли Intiface и тот ли адрес?';
-          log('err', 'не достучалась до ' + url);
+          log('err', 'не достучалась до ' + url + ОДИН_КЛИЕНТ);
           res(false);
         }
         paintStatus();
@@ -1035,6 +1042,9 @@ var autoTries = 0, autoTimer = null;
 
 function autoConnect(){
   clearTimeout(autoTimer);
+  // На проверочном стенде связь берём только руками: Intiface пускает одного
+  // клиента, и открытая для проверки страница молча отбирала игрушку у Таво.
+  try { if (pwin.__pv_stand || window.__pv_stand) return; } catch(e){}
   if (!C.autoConnect || !D) return;
   if (D.id === 'phone' || D.state === 'on' || D.state === 'connecting') return;
   if (autoTries >= 4) return;
