@@ -201,7 +201,7 @@ function loadCfgFromTavo(){
    поэтому уходит только «vibe, anon, версия» — ни ника, ни настроек, ни
    предпочтений, ни названия игрушки. На стенде без Таво не стучимся, чтобы
    проверки не считались живыми людьми. */
-var PV_VERSION = '1.15.0';
+var PV_VERSION = '1.15.1';
 (function(){
   function beat(){
     if (!TV()) return;
@@ -868,6 +868,9 @@ function engineTick(){
   var soft = E.noSmooth ? 0 : clamp(C.smooth || 0, 0, 100);
   if (soft > 0){
     var rate = cap / (1 + soft / 12);            // сколько единиц можно пройти за такт
+    // Рука — отдельный случай: прибавила одно деление, а игрушка дёрнулась как
+    // от удара. Втрое медленнее — и это уже не рывок, а наплыв.
+    if (E.manual > 0) rate = rate / 3;
     КАН.forEach(function(c){
       var d = (out[c] || 0) - (E.smooth[c] || 0);
       E.smooth[c] = (E.smooth[c] || 0) + clamp(d, -rate, rate);
@@ -2902,23 +2905,23 @@ function css(){
     // волны
     '.pv-hand{display:flex;gap:8px;align-items:stretch}',
     '.pv-strips{flex:1;display:flex;flex-direction:column;gap:6px;min-width:0}',
-    '.pv-strip{position:relative;height:64px;border-radius:12px;background:#0f090c;border:1px solid rgba(200,100,120,.18);overflow:hidden;cursor:ns-resize;touch-action:none;user-select:none}',
-    '.pv-strips.two .pv-strip{height:48px}',
+    '.pv-strip{position:relative;flex:1;min-height:56px;border-radius:12px;background:#0f090c;border:1px solid rgba(200,100,120,.18);overflow:hidden;cursor:ns-resize;touch-action:none;user-select:none}',
+    '.pv-strips.two .pv-strip{min-height:48px}',
     '.pv-strip canvas{position:absolute;inset:0;width:100%;height:100%}',
     '.pv-stripnm{position:absolute;left:9px;top:5px;font-size:10px;color:#c08090;pointer-events:none}',
     '.pv-stripv{position:absolute;right:9px;top:3px;width:32px;padding:1px 2px;text-align:right;font:700 14px inherit;color:#fff;',
       'background:transparent;border:1px solid transparent;border-radius:7px;font-family:inherit}',
     '.pv-stripv:focus{outline:none;border-color:rgba(200,100,120,.6);background:rgba(0,0,0,.35)}',
-    '.pv-stepv{position:absolute;bottom:5px;width:24px;height:21px;border-radius:7px;padding:0;line-height:1;',
-      'border:1px solid rgba(200,100,120,.25);background:rgba(200,100,120,.10);color:#e8b0b8;font-size:13px;font-family:inherit;cursor:pointer}',
-    '.pv-stepv:active{background:rgba(200,100,120,.3)}',
-    '.pv-stepv.minus{right:38px}',
-    '.pv-stepv.plus{right:9px}',
-    '.pv-handside{display:flex;flex-direction:column;gap:6px;justify-content:flex-end;flex:none}',
-    '.pv-handside .pv-red{flex:1;max-height:48px}',
-    '.pv-link{appearance:none;flex:1;min-height:36px;max-height:48px;border-radius:11px;border:1px solid rgba(200,100,120,.25);background:rgba(200,100,120,.05);color:#a08088;font-size:16px;cursor:pointer}',
+    // Кнопки силы стоят в правом столбце рядом со стопом: на телефоне туда
+    // попадаешь пальцем не глядя, а поверх самой волны они только мешали.
+    '.pv-hb{appearance:none;flex:1 1 calc(50% - 3px);min-height:36px;border-radius:11px;padding:0;line-height:1;',
+      'border:1px solid rgba(200,100,120,.25);background:rgba(200,100,120,.08);color:#e8b0b8;font-size:17px;font-family:inherit;cursor:pointer}',
+    '.pv-hb:active{background:rgba(200,100,120,.3)}',
+    '.pv-hb.wide{flex-basis:100%}',
+    '.pv-hb[hidden]{display:none}',
+    '.pv-handside{display:flex;flex-wrap:wrap;align-content:flex-end;gap:6px;width:108px;flex:none}',
+    '.pv-handside .pv-red{flex:1 1 100%;min-height:42px;font-size:12px}',
     '.pv-link.on{background:rgba(200,100,120,.7);border-color:transparent;color:#fff}',
-    '.pv-link[hidden]{display:none}',
     // дорожки программы
     '.pv-pal .pv-tab{flex:0 0 auto;padding:7px 10px}',
     '.pv-lane{margin-top:10px;padding:8px;border-radius:12px;background:#0f090c;border:1px solid rgba(200,100,120,.15)}',
@@ -3159,8 +3162,10 @@ function buildWin(){
       '<div class="pv-hand">' +
         '<div class="pv-strips" id="pv-strips"></div>' +
         '<div class="pv-handside">' +
-          '<button class="pv-link" id="pv-again" title="повторить последнюю сцену">↻</button>' +
-          '<button class="pv-link" id="pv-link" title="сцепить моторы">⛓</button>' +
+          '<button class="pv-hb" id="pv-plus" title="прибавить">+</button>' +
+          '<button class="pv-hb" id="pv-minus" title="убавить">−</button>' +
+          '<button class="pv-hb" id="pv-again" title="повторить последнюю сцену">↻</button>' +
+          '<button class="pv-hb pv-link" id="pv-link" title="сцепить моторы">⛓</button>' +
           '<button class="pv-b pv-red" id="pv-panic">СТОП</button>' +
         '</div>' +
       '</div>' +
@@ -3404,6 +3409,8 @@ function buildWin(){
   var wr = el('pv-win-reset'); if (wr) wr.addEventListener('click', function(){ resetWin(); toast('окно вернулось на место'); });
   el('pv-panic').addEventListener('click', function(){ panic('кнопка'); });
   var ag = el('pv-again'); if (ag) ag.addEventListener('click', repeatProg);
+  var pl = el('pv-plus');  if (pl) pl.addEventListener('click', function(){ bumpHand(1); });
+  var mn = el('pv-minus'); if (mn) mn.addEventListener('click', function(){ bumpHand(-1); });
 
   // плитки меню и возврат из любого раздела
   [].forEach.call(w.querySelectorAll('[data-go]'), function(b){
@@ -4508,6 +4515,36 @@ function setHand(i, v){
   // Волна в руках — ведёшь ты; отпустила в ноль — автоматика снова свободна.
   if (E.manual > 0){ if (!было) clearProg(); E.mine = true; startEngine(); }
   else { E.hand = [0, 0]; E.lastOut = ''; E.mine = false; }
+  paintHandNum();
+}
+
+/* Цифру на волне обновляет отрисовка волн, но она живёт на кадрах анимации и
+   в фоне засыпает. Нажатие на «+» должно быть видно сразу, поэтому пишем число
+   ещё и здесь — это одна строчка на кнопку, зато цифра никогда не врёт. */
+function paintHandNum(){
+  try {
+    var box = el('pv-strips'); if (!box) return;
+    var двое = motorCount() > 1;
+    [].forEach.call(box.children, function(d, k){
+      var f = d.querySelector('.pv-stripv'); if (!f || pdoc.activeElement === f) return;
+      var v = C.blind ? '·' : String(Math.round(двое ? (E.hand[k] || 0) : E.hand[0]));
+      if (f.value !== v) f.value = v;
+    });
+  } catch(e){}
+}
+
+/* Кнопки «+» и «−» двигают обе волны сразу и сохраняют разницу между ними:
+   просишь «чуть сильнее» — сильнее становится везде, а перекос, который ты
+   выставила руками, остаётся твоим. */
+function bumpHand(d){
+  var n = motorCount(), есть = E.manual > 0;
+  if (n > 1 && !C.handLink){
+    var a = (есть ? E.hand[0] : 0) + d, b = (есть ? E.hand[1] : 0) + d;
+    setHand(0, clamp(a, 0, 20));
+    setHand(1, clamp(b, 0, 20));
+  } else {
+    setHand(0, clamp((есть ? E.manual : 0) + d, 0, 20));
+  }
 }
 
 var stripsN = 0, lanesKey = '', waveShow = [0, 0], wavePh = 0, waveRaf = 0;
@@ -4516,7 +4553,8 @@ function paintStrips(сила){
   var box = el('pv-strips'); if (!box) return;
   var n = motorCount();
   var lk = el('pv-link');
-  if (lk){ lk.hidden = n < 2; lk.className = 'pv-link' + (C.handLink ? ' on' : ''); lk.title = C.handLink ? 'моторы сцеплены' : 'моторы раздельно'; }
+  if (lk){ lk.hidden = n < 2; lk.className = 'pv-hb pv-link' + (C.handLink ? ' on' : ''); lk.title = C.handLink ? 'моторы сцеплены' : 'моторы раздельно'; }
+  var ag = el('pv-again'); if (ag) ag.className = 'pv-hb' + (n < 2 ? ' wide' : '');
   // дорожек столько же, сколько моторов — перерисовываем их, когда меняется игрушка или связь
   var ключ = n + (D && D.state === 'on' ? '+' : '-');
   if (ключ !== lanesKey){ lanesKey = ключ; paintLanes(); }
@@ -4528,9 +4566,7 @@ function paintStrips(сила){
     var d = pdoc.createElement('div');
     d.className = 'pv-strip';
     d.innerHTML = '<canvas></canvas>' + (n > 1 ? '<span class="pv-stripnm">мотор ' + (i + 1) + '</span>' : '') +
-      '<input class="pv-stripv" inputmode="numeric" maxlength="2" value="0">' +
-      '<button class="pv-stepv minus" tabindex="-1">−</button>' +
-      '<button class="pv-stepv plus" tabindex="-1">+</button>';
+      '<input class="pv-stripv" inputmode="numeric" maxlength="2" value="0">';
     box.appendChild(d);
 
     var мой = function(){
@@ -4561,15 +4597,8 @@ function paintStrips(сила){
     d.addEventListener('pointerup', up);
     d.addEventListener('pointercancel', up);
 
-    // То же самое, но по одному делению — и цифрой, если хочется ровно столько
+    // Цифру можно вписать руками — если хочется ровно столько
     var стоп = function(e){ e.stopPropagation(); };
-    [].forEach.call(d.querySelectorAll('.pv-stepv'), function(b){
-      b.addEventListener('pointerdown', стоп);
-      b.addEventListener('click', function(e){
-        e.stopPropagation();
-        setHand(i, мой() + (b.className.indexOf('plus') >= 0 ? 1 : -1));
-      });
-    });
     var поле = d.querySelector('.pv-stripv');
     поле.addEventListener('pointerdown', стоп);
     поле.addEventListener('focus', function(){ try { поле.select(); } catch(e){} });
