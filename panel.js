@@ -103,6 +103,8 @@ var DEF = {
   bgKeep: true,                          // не глушить при сворачивании приложения
   tab: 'home',                          // открытая вкладка пульта
   gain: 1,                               // усиление того, что назначили теги/аналитик/эвристика
+  capOwn: 0,                             // свой потолок силы, 0 — как в настройках плагина
+  denySec: 2,                            // сколько длится отказ на пике, секунды
   gate: true,                            // не тратить запрос аналитика на спокойные сцены
   autoConnect: true,                     // сама цепляться к мосту, не дожидаясь кнопки
   wizDone: false,                        // мастер первого входа пройден или пропущен
@@ -199,7 +201,7 @@ function loadCfgFromTavo(){
    поэтому уходит только «vibe, anon, версия» — ни ника, ни настроек, ни
    предпочтений, ни названия игрушки. На стенде без Таво не стучимся, чтобы
    проверки не считались живыми людьми. */
-var PV_VERSION = '1.14.2';
+var PV_VERSION = '1.15.0';
 (function(){
   function beat(){
     if (!TV()) return;
@@ -674,7 +676,26 @@ var E = {
   tick: null
 };
 
-function capLevel(){ return clamp(host().capLevel, 0, 20); }
+// последняя сцена от модели — для кнопки «повторить»
+var LAST_PROG = null;
+
+function repeatProg(){
+  if (!LAST_PROG || !LAST_PROG.length){ toast('пока нечего повторять'); return; }
+  if (!D || D.state !== 'on'){ toast('сначала подключись'); return; }
+  E.lockUntil = 0;                       // СТОП глушил на три секунды — снимаем
+  if (!E.aiOn && host().aiControl) E.aiOn = true;
+  E.mine = false;
+  playProgram(LAST_PROG.slice(), 0);
+  buildPrompt(); paintStatus();
+  log('pat', 'повторяю последнюю сцену');
+}
+
+function capLevel(){
+  // Потолок из настроек — общий и жёсткий. Свой, в пульте, может быть только
+  // ниже: чтобы не лезть за границу, которую поставили один раз и надолго.
+  var общий = clamp(host().capLevel, 0, 20), мой = clamp(C.capOwn || 0, 0, 20);
+  return мой > 0 ? Math.min(общий, мой) : общий;
+}
 
 /* Каналы выхода. w — второй мотор: он слышен, только когда у шага стоит d
    (моторы идут раздельно). Иначе второй мотор, как и раньше, повторяет вибрацию. */
@@ -739,10 +760,14 @@ function onStepStart(st){
     var пик = Math.max(st.v || 0, st.r || 0, st.s || 0, st.t || 0, st.p || 0,
                        st.to ? Math.max(st.to.v || 0, st.to.s || 0, st.to.t || 0, st.to.r || 0) : 0);
     if (пик >= cap * 0.7 && Math.random() < deny){
-      var тишина = 3500 + Math.random() * 3000;
+      // Длину задаёшь сама: пять секунд тишины на пике сбивают всё, а секунда —
+      // это именно дразнилка, после которой хочется продолжения.
+      var сек = clamp(+C.denySec || 2, 1, 8);
+      var тишина = сек * 1000 * (0.85 + Math.random() * 0.4);
       E.denyUntil = now() + тишина;
+      E.denyFrom = now();
       E.denyLevel = 0.35;                 // после отказа возвращаемся вполсилы
-      log('deny', 'отказ на пике — тишина ' + Math.round(тишина / 1000) + ' сек');
+      log('deny', 'отказ на пике — тишина ' + (тишина / 1000).toFixed(1) + ' сек');
     }
   }
 }
@@ -786,8 +811,15 @@ function engineTick(){
   // Своеволие применяем только к сцене: ручной ползунок и свой ритм остаются точными.
   if (!E.manual && E.spice){
     if ((E.denyUntil && t < E.denyUntil) || (E.pauseUntil && t < E.pauseUntil)){
-      out = { v: 0, r: 0, p: 0, s: 0, t: 0, w: 0 };
+      // Не обрыв в ноль, а быстрый спуск за треть секунды: у самих игрушек пауза
+      // всегда начинается спуском, и резкая тишина читается как поломка.
+      var спуск = E.denyFrom ? clamp((t - E.denyFrom) / 350, 0, 1) : 1;
+      КАН.forEach(function(c){ out[c] *= (1 - спуск); });
     } else {
+      // и обратно тоже поднимаемся, а не прыгаем: полсилы → полная за две секунды
+      if (E.denyUntil && t >= E.denyUntil && E.denyLevel < 1){
+        E.denyLevel = Math.min(1, 0.35 + (t - E.denyUntil) / 2000 * 0.65);
+      }
       var k = (E.jitter || 1) * (E.denyLevel || 1);
       if (k !== 1) КАН.forEach(function(c){ out[c] *= k; });
     }
@@ -804,7 +836,7 @@ function engineTick(){
       return;
     }
     if (C.breathe){
-      var k = 0.88 + 0.12 * (0.5 + 0.5 * Math.sin(waited / 4200));   // ±12% за ~26 секунд
+      var k = 0.75 + 0.25 * (0.5 + 0.5 * Math.sin(waited / 2200));   // ±25% за ~14 секунд
       КАН.forEach(function(c){ out[c] *= k; });
     }
   }
@@ -813,11 +845,14 @@ function engineTick(){
      между двумя ответами всё равно оставалась мёртвой — её и приняли за зависание.
      Теперь фон держится в любой паузе: сцена кончилась, модель думает, ты читаешь.
      Молчание нарочное — отказ на пике, стоп-слово, «выключил в сцене» — не трогаем. */
-  if (C.idleLevel > 0 && !E.manual && !E.mine && E.aiOn && host().aiControl &&
+  if (C.idleLevel !== 0 && !E.manual && !E.mine && E.aiOn && host().aiControl &&
       t >= E.lockUntil && !(E.devHold && t < E.devHold) &&
       !(E.denyUntil && t < E.denyUntil) && !(E.pauseUntil && t < E.pauseUntil) &&
       out.v + out.r + out.p + out.s + out.t < 0.5){
-    out[mainChannel()] = C.idleLevel;
+    // Ровный фон на долгой паузе перестаёшь чувствовать через минуту. «Волна» —
+    // тот же фон, но живой: медленно ходит туда-сюда, и его слышно всё время.
+    out[mainChannel()] = C.idleLevel > 0 ? C.idleLevel
+      : clamp(4.5 + 3.5 * Math.sin(t / 2600), 1, 8);
   }
 
   // Мягкий вход после подключения: за две секунды поднимаемся с нуля до нужного,
@@ -948,6 +983,9 @@ function playProgram(steps, fromIdx, opts){
   // Своеволие уместно в сцене, но не там, где ты задала ритм сама.
   E.spice = !(opts && opts.exact);
   E.mine = !!(opts && opts.mine);
+  // Сцену, которую собрал плагин, запоминаем целиком: после СТОП её можно
+  // завести заново, не выпрашивая у модели новый ответ.
+  if (!E.mine) LAST_PROG = steps.slice();
   // Своя петля для этой программы. null — значит «как настроено для сцен».
   E.progLoop = (opts && opts.loop != null) ? !!opts.loop : null;
   // Точная проверка: уровень ставим как есть, иначе сглаживание съедает короткие толчки.
@@ -2704,6 +2742,11 @@ function css(){
       'font-size:18px;color:#e8b0b8;background:linear-gradient(145deg,#251518,#140c10);',
       'border:1px solid rgba(200,100,120,.45);box-shadow:0 6px 18px rgba(0,0,0,.5);cursor:grab;user-select:none;touch-action:none;-webkit-tap-highlight-color:transparent}',
     '#pv-dock.pv-live{border-color:rgba(220,120,140,.9);animation:pv-beat 1.2s infinite}',
+    // Стоп рядом с кнопкой ≋: пока игрушка работает, его видно, не открывая пульт
+    '#pv-stop2{position:fixed;z-index:2147483000;width:38px;height:38px;border-radius:50%;display:none;align-items:center;justify-content:center;',
+      'font-size:11px;font-weight:700;letter-spacing:.3px;color:#f0b8ac;background:linear-gradient(145deg,#2a1214,#170a0c);',
+      'border:1px solid rgba(220,80,60,.65);box-shadow:0 6px 18px rgba(0,0,0,.5);cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}',
+    '#pv-stop2.on{display:flex}',
     '@keyframes pv-beat{0%{box-shadow:0 0 0 0 rgba(200,100,120,.5)}70%{box-shadow:0 0 0 11px rgba(200,100,120,0)}100%{box-shadow:0 0 0 0 rgba(200,100,120,0)}}',
 
     // окно
@@ -2716,9 +2759,15 @@ function css(){
       'bottom:calc(var(--tavo-inset-bottom-input, 66px) + 8px);',
       'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
     '#pv-win.on{display:flex;align-items:flex-end;justify-content:center;padding:0 10px}',
-    '#pv-card{pointer-events:auto;position:relative;width:100%;max-width:var(--pv-cw,400px);height:100%;max-height:var(--pv-ch,620px);display:flex;flex-direction:column;',
+    // border-box: без него карточка шире своего места на ширину рамки и полей —
+    // на телефоне она вылезала за края экрана на полтора десятка пикселей
+    '#pv-card{pointer-events:auto;position:relative;box-sizing:border-box;width:100%;max-width:420px;height:100%;max-height:620px;display:flex;flex-direction:column;',
       'background:linear-gradient(160deg,#1a1015,#120a0e);border:1px solid rgba(200,100,120,.35);',
       'border-radius:20px;box-shadow:0 10px 30px rgba(0,0,0,.6);padding:14px 14px 8px;color:#e0c0c0;font-size:12px;line-height:1.45}',
+    // окно с заданным размером: занимает всё, что дали, и тянется от верхнего края вниз
+    '#pv-card.pv-fixed{box-sizing:border-box;width:var(--pv-cw);height:var(--pv-ch);max-width:none;max-height:none}',
+    '#pv-win.pv-sized{top:8px;bottom:8px}',
+    '#pv-win.pv-sized.on{align-items:flex-start}',
     // уголок для растягивания: только там, где есть мышь
     '#pv-grip{position:absolute;right:2px;bottom:2px;width:20px;height:20px;cursor:nwse-resize;touch-action:none;',
       'border-right:2px solid rgba(200,100,120,.5);border-bottom:2px solid rgba(200,100,120,.5);border-radius:0 0 18px 0;opacity:.45}',
@@ -2857,7 +2906,14 @@ function css(){
     '.pv-strips.two .pv-strip{height:48px}',
     '.pv-strip canvas{position:absolute;inset:0;width:100%;height:100%}',
     '.pv-stripnm{position:absolute;left:9px;top:5px;font-size:10px;color:#c08090;pointer-events:none}',
-    '.pv-stripv{position:absolute;right:9px;top:4px;font-size:14px;font-weight:700;color:#fff;pointer-events:none}',
+    '.pv-stripv{position:absolute;right:9px;top:3px;width:32px;padding:1px 2px;text-align:right;font:700 14px inherit;color:#fff;',
+      'background:transparent;border:1px solid transparent;border-radius:7px;font-family:inherit}',
+    '.pv-stripv:focus{outline:none;border-color:rgba(200,100,120,.6);background:rgba(0,0,0,.35)}',
+    '.pv-stepv{position:absolute;bottom:5px;width:24px;height:21px;border-radius:7px;padding:0;line-height:1;',
+      'border:1px solid rgba(200,100,120,.25);background:rgba(200,100,120,.10);color:#e8b0b8;font-size:13px;font-family:inherit;cursor:pointer}',
+    '.pv-stepv:active{background:rgba(200,100,120,.3)}',
+    '.pv-stepv.minus{right:38px}',
+    '.pv-stepv.plus{right:9px}',
     '.pv-handside{display:flex;flex-direction:column;gap:6px;justify-content:flex-end;flex:none}',
     '.pv-handside .pv-red{flex:1;max-height:48px}',
     '.pv-link{appearance:none;flex:1;min-height:36px;max-height:48px;border-radius:11px;border:1px solid rgba(200,100,120,.25);background:rgba(200,100,120,.05);color:#a08088;font-size:16px;cursor:pointer}',
@@ -2992,6 +3048,14 @@ function buildDock(){
   var hold = null;
   ic.addEventListener('touchstart', function(){ hold = setTimeout(function(){ moved = true; panic('долгое нажатие'); }, 700); }, { passive: true });
   ic.addEventListener('touchend', function(){ clearTimeout(hold); });
+
+  /* Отдельный СТОП возле кнопки ≋. Он нужен именно на телефоне: пульт там
+     занимает весь экран, и чтобы остановить игрушку, приходилось его открывать.
+     Пока тихо — кнопки нет, чтобы не мозолила глаза. */
+  var sp = pdoc.createElement('div');
+  sp.id = 'pv-stop2'; sp.textContent = 'СТОП';
+  (pdoc.documentElement || pdoc.body).appendChild(sp);
+  sp.addEventListener('click', function(e){ e.stopPropagation(); panic('кнопка рядом с ≋'); });
   watchInsets();
 }
 
@@ -3001,6 +3065,19 @@ function buildDock(){
 function insets(){
   try { var T = TV(); if (T && T.ui && typeof T.ui.getInsets === 'function') return T.ui.getInsets() || {}; } catch(e){}
   return {};
+}
+
+/* Стоп ходит за кнопкой ≋ и показывается только когда есть что останавливать. */
+function placeStop2(){
+  var sp = el('pv-stop2'), ic = el('pv-dock');
+  if (!sp || !ic) return;
+  var живо = !!(E.live && Math.max(E.live.v, E.live.r, E.live.p, E.live.s, E.live.t, E.live.d ? E.live.w || 0 : 0) > 0);
+  if (sp.classList.contains('on') !== живо) sp.className = живо ? 'on' : '';
+  if (!живо) return;
+  var r; try { r = ic.getBoundingClientRect(); } catch(e){ return; }
+  if (!r.width) return;
+  sp.style.left = Math.round(r.left + 3) + 'px';
+  sp.style.top = Math.round(r.top - 44) + 'px';
 }
 
 function clampDock(){
@@ -3082,6 +3159,7 @@ function buildWin(){
       '<div class="pv-hand">' +
         '<div class="pv-strips" id="pv-strips"></div>' +
         '<div class="pv-handside">' +
+          '<button class="pv-link" id="pv-again" title="повторить последнюю сцену">↻</button>' +
           '<button class="pv-link" id="pv-link" title="сцепить моторы">⛓</button>' +
           '<button class="pv-b pv-red" id="pv-panic">СТОП</button>' +
         '</div>' +
@@ -3251,13 +3329,21 @@ function buildWin(){
         '<div class="pv-lbl">Характер игры</div>' +
         '<div class="pv-note">🎚 Как играть то, что придумала модель. Профиль наверху ставит всё сразу, здесь — по одному.</div>' +
 
+        '<div class="pv-pick">мой потолок силы</div>' +
+        '<div class="pv-tabs" id="pv-capown"></div>' +
+        '<div class="pv-hint">выше этого плагин не поднимется, что бы ни придумала модель. Ниже общего потолка из настроек ' + ХОСТ.имя + ' — можно, выше — нет</div>' +
+
         '<div class="pv-pick">громкость</div>' +
         '<div class="pv-tabs" id="pv-gain"></div>' +
         '<div class="pv-hint">насколько громче или тише играть то, что назначила модель</div>' +
 
         '<div class="pv-pick">отказ на пике</div>' +
         '<div class="pv-tabs" id="pv-deny"></div>' +
-        '<div class="pv-hint">вместо максимума — тишина на несколько секунд, потом вполсилы</div>' +
+        '<div class="pv-hint">вместо максимума — тишина, потом возвращение вполсилы</div>' +
+
+        '<div class="pv-pick">длина отказа</div>' +
+        '<div class="pv-tabs" id="pv-denysec"></div>' +
+        '<div class="pv-hint">сколько держать тишину. Секунда дразнит, пять — сбивает настрой</div>' +
 
         '<div class="pv-pick">своеволие</div>' +
         '<div class="pv-tabs" id="pv-chaos"></div>' +
@@ -3279,13 +3365,17 @@ function buildWin(){
           '<div class="pv-hint">резко — уровень прыгает сразу, мягко — плавно доезжает за секунду</div>' +
           '<div class="pv-pick">между сценами</div>' +
           '<div class="pv-tabs" id="pv-idle"></div>' +
-          '<div class="pv-hint">играть нечего — полная тишина или еле заметный фон; он держится и в паузах между ответами</div>' +
-          '<div class="pv-sw"><span>Дышать, пока модель думает</span><div class="pv-tg" id="pv-tg-breathe"><i></i></div></div>' +
+          '<div class="pv-hint">играть нечего — тишина, ровный фон или «волна»: она медленно ходит вверх-вниз, и её слышно даже в долгой паузе. Держится и между ответами</div>' +
+          '<div class="pv-swrow"><div class="pv-sw"><span>Дышать, пока модель думает</span><div class="pv-tg" id="pv-tg-breathe"><i></i></div></div><div class="pv-hint">пока идёт ответ, уровень плавно ходит вверх-вниз на четверть — чтобы ожидание не было ровным гулом</div></div>' +
           '<div class="pv-sw"><span>Глушить, когда пишу я</span><div class="pv-tg" id="pv-tg-user"><i></i></div></div>' +
+          '<div class="pv-pick">размер шрифта в пульте</div>' +
+          '<div class="pv-tabs" id="pv-fsize"></div>' +
+          '<div class="pv-hint">для компьютера и Таверны: у всех свой масштаб системы и браузера, и окно у каждого выходит своего размера. Само окно тянется за уголок внизу справа</div>' +
           '<div class="pv-row" style="margin-top:8px">' +
-            '<button class="pv-b pv-ghost" id="pv-dock-reset" style="flex:1">Вернуть кнопку ≋ на место</button>' +
+            '<button class="pv-b pv-ghost" id="pv-dock-reset" style="flex:1">Вернуть кнопку ≋</button>' +
+            '<button class="pv-b pv-ghost" id="pv-win-reset" style="flex:1">Вернуть окно</button>' +
           '</div>' +
-          '<div class="pv-hint">если утащила её за край и больше не достать</div>' +
+          '<div class="pv-hint">если утащила их за край и больше не достать</div>' +
         '</details>' +
       '</div>' +
 
@@ -3311,7 +3401,9 @@ function buildWin(){
   // живым, закрывает только ✕.
   el('pv-close').addEventListener('click', closeWin);
   var dr = el('pv-dock-reset'); if (dr) dr.addEventListener('click', resetDock);
+  var wr = el('pv-win-reset'); if (wr) wr.addEventListener('click', function(){ resetWin(); toast('окно вернулось на место'); });
   el('pv-panic').addEventListener('click', function(){ panic('кнопка'); });
+  var ag = el('pv-again'); if (ag) ag.addEventListener('click', repeatProg);
 
   // плитки меню и возврат из любого раздела
   [].forEach.call(w.querySelectorAll('[data-go]'), function(b){
@@ -4436,12 +4528,30 @@ function paintStrips(сила){
     var d = pdoc.createElement('div');
     d.className = 'pv-strip';
     d.innerHTML = '<canvas></canvas>' + (n > 1 ? '<span class="pv-stripnm">мотор ' + (i + 1) + '</span>' : '') +
-      '<span class="pv-stripv"></span>';
+      '<input class="pv-stripv" inputmode="numeric" maxlength="2" value="0">' +
+      '<button class="pv-stepv minus" tabindex="-1">−</button>' +
+      '<button class="pv-stepv plus" tabindex="-1">+</button>';
     box.appendChild(d);
-    var лвл = function(y){ var r = d.getBoundingClientRect(); return (1 - (y - r.top) / Math.max(1, r.height)) * 20; };
-    var тянет = false;
-    var down = function(e){ тянет = true; try { d.setPointerCapture(e.pointerId); } catch(_){} setHand(i, лвл(e.clientY)); if (e.cancelable) e.preventDefault(); };
-    var move = function(e){ if (тянет) setHand(i, лвл(e.clientY)); };
+
+    var мой = function(){
+      if (!(E.manual > 0)) return 0;
+      return (motorCount() > 1 && !C.handLink) ? E.hand[i] : E.manual;
+    };
+
+    /* Тянем от того места, где взялись, а не прыгаем под палец. Раньше любое
+       касание полосы сразу ставило шесть-семь, и добавить себе единицу было
+       невозможно. Полный ход — две высоты полосы: низкие уровни ловятся спокойно. */
+    var тянет = false, y0 = 0, v0 = 0;
+    var down = function(e){
+      тянет = true; y0 = e.clientY; v0 = мой();
+      try { d.setPointerCapture(e.pointerId); } catch(_){}
+      if (e.cancelable) e.preventDefault();
+    };
+    var move = function(e){
+      if (!тянет) return;
+      var r = d.getBoundingClientRect();
+      setHand(i, v0 + (y0 - e.clientY) / Math.max(1, r.height * 2) * 20);
+    };
     var up = function(){
       if (!тянет) return; тянет = false;
       if (C.handZero) setHand(i, 0);
@@ -4450,6 +4560,30 @@ function paintStrips(сила){
     d.addEventListener('pointermove', move);
     d.addEventListener('pointerup', up);
     d.addEventListener('pointercancel', up);
+
+    // То же самое, но по одному делению — и цифрой, если хочется ровно столько
+    var стоп = function(e){ e.stopPropagation(); };
+    [].forEach.call(d.querySelectorAll('.pv-stepv'), function(b){
+      b.addEventListener('pointerdown', стоп);
+      b.addEventListener('click', function(e){
+        e.stopPropagation();
+        setHand(i, мой() + (b.className.indexOf('plus') >= 0 ? 1 : -1));
+      });
+    });
+    var поле = d.querySelector('.pv-stripv');
+    поле.addEventListener('pointerdown', стоп);
+    поле.addEventListener('focus', function(){ try { поле.select(); } catch(e){} });
+    var приме = function(){
+      var v = parseInt(String(поле.value).replace(/[^0-9]/g, ''), 10);
+      setHand(i, isNaN(v) ? 0 : v);
+    };
+    поле.addEventListener('change', приме);
+    поле.addEventListener('blur', приме);
+    поле.addEventListener('keydown', function(e){
+      if (e.key === 'Enter'){ приме(); try { поле.blur(); } catch(_){} }
+      if (e.key === 'ArrowUp'){ if (e.preventDefault) e.preventDefault(); setHand(i, мой() + 1); }
+      if (e.key === 'ArrowDown'){ if (e.preventDefault) e.preventDefault(); setHand(i, мой() - 1); }
+    });
   })(i);
   startWaves();
 }
@@ -4493,9 +4627,10 @@ function drawWaves(){
       if (x) c.lineTo(x, y); else c.moveTo(x, y);
     }
     c.strokeStyle = цвета[i] || цвета[0]; c.lineWidth = 1.7 * dpr; c.stroke();
-    var v = d.lastChild;
+    var v = d.querySelector('.pv-stripv');
     var txt = C.blind ? '·' : String(Math.round(цель[i]));
-    if (v.textContent !== txt) v.textContent = txt;
+    // пока цифру правят руками, не перебиваем её тем, что играет
+    if (v && v.value !== txt && pdoc.activeElement !== v) v.value = txt;
   });
   waveRaf = waveNext(drawWaves);
 }
@@ -4508,10 +4643,13 @@ function drawWaves(){
 
 var ВЫБОРЫ = {
   gain:   [{ v: 0.7, t: 'тише' }, { v: 1, t: 'как просят' }, { v: 1.5, t: 'громче' }, { v: 2.2, t: 'вдвое' }],
-  deny:   [{ v: 0, t: 'никогда' }, { v: 15, t: 'редко' }, { v: 40, t: 'иногда' }, { v: 70, t: 'часто' }],
+  deny:   [{ v: 0, t: 'никогда' }, { v: 8, t: 'редко' }, { v: 25, t: 'иногда' }, { v: 55, t: 'часто' }],
+  denysec:[{ v: 1, t: 'секунда' }, { v: 2, t: 'две' }, { v: 3, t: 'три' }, { v: 5, t: 'пять' }],
+  capown: [{ v: 0, t: 'как в настройках' }, { v: 8, t: 'до 8' }, { v: 12, t: 'до 12' }, { v: 16, t: 'до 16' }],
+  fsize:  [{ v: 0.9, t: 'мельче' }, { v: 1, t: 'обычный' }, { v: 1.15, t: 'крупнее' }, { v: 1.3, t: 'ещё крупнее' }],
   chaos:  [{ v: 0, t: 'ровно' }, { v: 15, t: 'чуть' }, { v: 40, t: 'заметно' }, { v: 75, t: 'своенравно' }],
   smooth: [{ v: 0, t: 'резко' }, { v: 35, t: 'мягко' }, { v: 70, t: 'очень мягко' }],
-  idle:   [{ v: 0, t: 'тишина' }, { v: 2, t: 'слабый фон' }, { v: 4, t: 'заметный фон' }]
+  idle:   [{ v: 0, t: 'тишина' }, { v: 3, t: 'слабый фон' }, { v: 6, t: 'заметный фон' }, { v: -1, t: 'волна' }]
 };
 
 // Профиль мог поставить значение между кнопками — подсвечиваем ближайшую.
@@ -4579,6 +4717,12 @@ function paintPicks(){
     function(v){ C.smooth = v; saveCfg(); saveChatCfg(); });
   chipRow('pv-idle',   'idle',   function(){ return C.idleLevel; },
     function(v){ C.idleLevel = v; saveCfg(); saveChatCfg(); });
+  chipRow('pv-capown', 'capown', function(){ return C.capOwn; },
+    function(v){ C.capOwn = v; saveCfg(); saveChatCfg(); paintStatus(); });
+  chipRow('pv-denysec','denysec',function(){ return C.denySec; },
+    function(v){ C.denySec = v; saveCfg(); saveChatCfg(); });
+  chipRow('pv-fsize',  'fsize',  function(){ return fontScale(); },
+    function(v){ lsSet('pv_winzoom', v); sizeWin(); placeWin(); });
 }
 
 // Способ связи почти всегда один и тот же, поэтому он спрятан под раскрывашкой.
@@ -4743,7 +4887,8 @@ function paintStatus(){
     if (caps && caps.known){
       var вид = caps.kinds.filter(function(p){ return p.k || p.air; })
         .map(function(p){ return (p.k || 'игрушка') + (p.air ? ', воздух' : ''); });
-      sub.textContent = (вид.length ? вид.join(' + ') + ' · ' : '') + caps.brief + battNote() + (fragileToy() ? ' · бережно' : '');
+      // «бережно» — это внутренняя оговорка про Bluetooth, в журнале она есть, а тут только путала
+      sub.textContent = (вид.length ? вид.join(' + ') + ' · ' : '') + caps.brief + battNote();
     }
     else sub.textContent = D ? (D.info || 'не подключено') : 'не подключено';
   }
@@ -4760,7 +4905,7 @@ function paintStatus(){
     if (!H.aiControl) parts.push('⚠ рубильник в настройках выключен');
     else if (!E.aiOn) parts.push('персонаж не ведёт — игрушка молчит');
     else parts.push('персонаж ведёт игрушку');
-    parts.push('до ' + H.capLevel + '/20');
+    parts.push('до ' + capLevel() + '/20');
     if (H.maxMinutes > 0) parts.push(H.maxMinutes + ' мин');
     if (H.safeword) parts.push('«' + H.safeword + '»');
     g.textContent = parts.join(' · ');
@@ -4839,6 +4984,7 @@ function paintMeter(){
   if (n) n.textContent = C.blind ? '·' : v;
   var dk = el('pv-dock');
   if (dk){ var live = v > 0; if (live !== (dk.className === 'pv-live')) dk.className = live ? 'pv-live' : ''; }
+  placeStop2();
 }
 
 function paintLog(){
@@ -4878,7 +5024,19 @@ function closeWin(){ var w = el('pv-win'); if (w) w.classList.remove('on'); }
 /* Окно пульта можно перетащить за шапку — в Таверне и в Таво на компьютере.
    На телефоне оно и так во весь экран, а шапку там легко задеть пальцем. Место
    запоминается; двойной щелчок по шапке возвращает окно на место. */
-function winDragOn(){ return НА_СТ || плат() === 'desktop'; }
+function winDragOn(){
+  // Узкий экран — это телефон, чем бы он ни назывался: там окно и так во весь
+  // экран, уголок пальцем не поймать, а принудительный размер ломал вёрстку.
+  var W = 0; try { W = pwin.innerWidth || 0; } catch(e){}
+  return (НА_СТ || плат() === 'desktop') && W >= 560;
+}
+
+/* Размер шрифта в пульте. На большом мониторе со своим масштабом системы
+   панель у всех выходит разной, поэтому пусть каждый подгонит под себя. */
+function fontScale(){
+  var z = +lsGet('pv_winzoom', 1);
+  return (z >= 0.8 && z <= 1.4) ? z : 1;
+}
 
 function placeWin(){
   var card = el('pv-card'); if (!card) return;
@@ -4891,27 +5049,42 @@ function placeWin(){
   // окно целиком остаётся на экране: подвинули его и сменили размер окна браузера — не теряем
   var x = clamp(pos.x, -r.left + 4, W - r.right - 4);
   var y = clamp(pos.y, -r.top + 4, H - r.bottom - 4);
-  card.style.transform = 'translate(' + Math.round(x) + 'px,' + Math.round(y) + 'px)';
+  // При увеличенном шрифте карточка считает свои пиксели крупнее — сдвиг делим,
+  // иначе окно уезжает из-под курсора быстрее, чем его тянут.
+  var z = fontScale();
+  card.style.transform = 'translate(' + Math.round(x / z) + 'px,' + Math.round(y / z) + 'px)';
 }
 
 /* Размер окна. На телефоне он один и тот же — панель и так во весь экран.
    На компьютере и в Таверне места куда больше, поэтому окно сразу шире и выше,
    а уголок внизу справа тянется мышью. Размер запоминается. */
-var РАЗМЕР = { w: 520, h: 780 };
+var РАЗМЕР = { w: 560, h: 820 };
 
 function sizeWin(){
-  var card = el('pv-card'); if (!card) return;
+  var card = el('pv-card'), win = el('pv-win'); if (!card) return;
   var g = el('pv-grip'); if (g) g.hidden = !winDragOn();
   if (!winDragOn()){
-    try { card.style.removeProperty('--pv-cw'); card.style.removeProperty('--pv-ch'); } catch(e){}
+    card.classList.remove('pv-fixed');
+    if (win) win.classList.remove('pv-sized');
+    try { card.style.zoom = ''; card.style.removeProperty('--pv-cw'); card.style.removeProperty('--pv-ch'); } catch(e){}
     return;
   }
+  var z = fontScale();
   var s = lsGet('pv_winsize', null) || РАЗМЕР;
   var W = pwin.innerWidth || 900, H = pwin.innerHeight || 700;
-  // не даём утащить окно за пределы экрана: по краям всегда остаётся полоска чата
-  var w = Math.round(clamp(+s.w || РАЗМЕР.w, 340, Math.max(340, W - 24)));
-  var h = Math.round(clamp(+s.h || РАЗМЕР.h, 380, Math.max(380, H - 24)));
-  try { card.style.setProperty('--pv-cw', w + 'px'); card.style.setProperty('--pv-ch', h + 'px'); } catch(e){}
+  // Упереться можно только в край экрана — раньше потолок был куда ниже, и окно
+  // не растягивалось на пустое место рядом с чатом.
+  var w = clamp(+s.w || РАЗМЕР.w, 320, Math.max(320, W - 16));
+  var h = clamp(+s.h || РАЗМЕР.h, 360, Math.max(360, H - 16));
+  card.classList.add('pv-fixed');
+  if (win) win.classList.add('pv-sized');
+  // Размер задаём в единицах самой карточки: при увеличенном шрифте она их
+  // домножает, и без деления окно уезжало бы за экран.
+  try {
+    card.style.zoom = (z === 1) ? '' : String(z);
+    card.style.setProperty('--pv-cw', Math.round(w / z) + 'px');
+    card.style.setProperty('--pv-ch', Math.round(h / z) + 'px');
+  } catch(e){}
 }
 
 function resetWin(){
@@ -4943,7 +5116,8 @@ function wireWinDrag(){
     if (!on) return; on = false;
     // запоминаем то, что реально на экране, а не то, куда тянули за край
     var card2 = el('pv-card'), m = /translate\((-?\d+)px,\s*(-?\d+)px\)/.exec(card2 && card2.style.transform || '');
-    if (m) lsSet('pv_winpos', { x: +m[1], y: +m[2] });
+    var z = fontScale();
+    if (m) lsSet('pv_winpos', { x: Math.round(+m[1] * z), y: Math.round(+m[2] * z) });
   };
   head.addEventListener('pointerup', up);
   head.addEventListener('pointercancel', up);
