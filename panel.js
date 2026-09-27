@@ -210,7 +210,7 @@ function loadCfgFromTavo(){
    поэтому уходит только «vibe, anon, версия» — ни ника, ни настроек, ни
    предпочтений, ни названия игрушки. На стенде без Таво не стучимся, чтобы
    проверки не считались живыми людьми. */
-var PV_VERSION = '1.16.3';
+var PV_VERSION = '1.16.4';
 (function(){
   function beat(){
     if (!TV()) return;
@@ -2102,12 +2102,36 @@ function analystInput(plain){
 
 var brainKey = '', brainBusy = false, brainTimer = null;
 
+/* Ты взяла игрушку в руки — волной, «+», рисунком — пока читаешь и пишешь. Раньше
+   это держалось до СТОП: ответы персонажа шли мимо, а тумблер «персонаж» горел,
+   и было не понять, почему сцена стоит. Теперь твой ход кончается вместе с
+   сообщением: отправила, переписываешь или продолжаешь ответ — ведёт персонаж.
+   Кому нужен свой рисунок на всю сцену, выключает тумблер «персонаж». */
+function вернутьПерсонажу(почему){
+  if (!E.mine && !(E.manual > 0)) return;
+  E.manual = 0; E.hand = [0, 0]; E.lastOut = '';
+  clearProg(); E.mine = false;
+  log('me', почему + ' — сцену снова ведёт персонаж');
+  try { paintHandNum(); paintStatus(); } catch(e){}
+}
+
+var brainLen = 0, fbLen = 0;
+
 function runBrain(key, text){
-  if (brainBusy || key === brainKey) return;
+  // Аналитик ещё думает над прошлым ответом — этот не выбрасываем, а ставим в очередь.
+  // Раньше он просто терялся, и казалось, что модель «не получила текст».
+  if (brainBusy){
+    clearTimeout(brainTimer);
+    brainTimer = setTimeout(function(){ runBrain(key, text); }, 2500);
+    return;
+  }
+  // Тот же ответ уже разобран. Но если его дописали («продолжить», оборванный пост
+  // догенерировали) — текста стало заметно больше, и разбираем заново.
+  if (key === brainKey && String(text || '').length <= brainLen + 200) return;
   // Играет твой ритм — не тратим на аналитика платный запрос, результат которого
   // всё равно некуда деть, и не помечаем ответ разобранным.
   if (E.mine){ log('brain', 'играет твой ритм — сцену не разбираю'); return; }
-  brainKey = key;
+  brainKey = key; brainLen = String(text || '').length;
   var plain = безПлашек(сценыТекст(text)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(-1800);
   if (!plain) return;
 
@@ -2346,7 +2370,8 @@ function сценаИгрушки(plain, key){
 /* Гибрид: теги главные, но если их в ответе нет — сцену ведёт разбор по словам.
    Так работает при любой модели, и выбирать режим не приходится. */
 function fallbackByWords(key, text){
-  if (fbKey === key) return;
+  if (fbKey === key && String(text || '').length <= fbLen + 60) return;
+  fbLen = String(text || '').length;
   if (!(E.aiOn && host().aiControl) || !D || D.state !== 'on') return;
   // Играет твой ритм — сцену не строим и, главное, не помечаем ответ разобранным:
   // иначе после СТОП он так и остался бы неотыгранным.
@@ -2442,6 +2467,7 @@ function readLast(){
         buildPrompt(true);                          // новый ход: подсказки расходуются только здесь
         E.waiting = now();
         моя = null;
+        вернутьПерсонажу('ты отправила сообщение');
         if (!E.mine && тыВзялаИгрушку(text)){
           // игрушку выставила ты — короткий отклик поверх был бы лишним
         } else if (C.reply && !E.mine){          // твой ритм важнее короткого отклика
@@ -2456,6 +2482,11 @@ function readLast(){
     E.waiting = 0;                                  // ответ пошёл — ждать больше нечего
 
     var key = String(m.id != null ? m.id : all.length);
+
+    // Пошёл новый ответ или этот переписывают — твой ход кончился.
+    if (lastMsgKey && (key !== lastMsgKey || text.length + 40 < lastMsgLen)){
+      вернутьПерсонажу(key !== lastMsgKey ? 'пошёл новый ответ' : 'ответ переписывается');
+    }
 
     // Живой отклик на печатающийся текст — до всякого разбора целой сцены.
     if (!parseCmds(text).length) flowScan(key, text);
@@ -3599,6 +3630,8 @@ function buildWin(){
         '<div class="pv-lbl">Что играло</div>' +
         '<div class="pv-note">🎵 Дорожка игры: паттерны, своя программа, волны и что плагин услышал в сцене.</div>' +
         '<div class="pv-log" id="pv-play"></div>' +
+        '<button class="pv-b pv-ghost" id="pv-brain-now2" style="width:100%;margin-top:8px">↺ Перечитать последний ответ</button>' +
+        '<div class="pv-hint">модель оборвала пост или ты вела сама — плагин заново разберёт ответ, и сцену снова ведёт персонаж</div>' +
       '</div>' +
     '</div>' +
 
@@ -4643,6 +4676,7 @@ function brainNow(){
     }
     if (!m){ toast('в чате нет ответа персонажа'); return; }
     brainKey = ''; brainBusy = false;
+    вернутьПерсонажу('перечитываю ответ');
     startEngine();
     runBrain('ручной-' + now(), String(m.content || m.text || ''));
   }).catch(function(){ toast('не вышло прочитать чат'); });
@@ -4711,10 +4745,12 @@ function paintBrains(){
       });
     });
   }
-  var bn = el('pv-brain-now');
-  if (bn) bn.addEventListener('click', function(){
-    if (!D || D.state !== 'on'){ toast('сначала подключи устройство'); return; }
-    brainNow();
+  ['pv-brain-now', 'pv-brain-now2'].forEach(function(id){
+    var bn = el(id);
+    if (bn) bn.addEventListener('click', function(){
+      if (!D || D.state !== 'on'){ toast('сначала подключи устройство'); return; }
+      brainNow();
+    });
   });
 }
 
@@ -5376,6 +5412,7 @@ function paintStatus(){
     var parts = [];
     if (!H.aiControl) parts.push('⚠ рубильник в настройках выключен');
     else if (!E.aiOn) parts.push('персонаж не ведёт — игрушка молчит');
+    else if (E.mine) parts.push('сейчас ведёшь ты — отправишь сообщение, и снова персонаж');
     else parts.push('персонаж ведёт игрушку');
     parts.push('до ' + capLevel() + '/20');
     if (H.maxMinutes > 0) parts.push(H.maxMinutes + ' мин');
