@@ -100,8 +100,11 @@ var DEF = {
   brain: 'live',
   ep: '', key: '', model: '',            // свой OpenAI-совместимый эндпоинт для аналитика
   keepAwake: true,                       // не давать экрану гаснуть, пока идёт сцена
+  dockDim: true,                         // кнопка ≋ полупрозрачная, пока игрушка молчит
   bgKeep: true,                          // не глушить при сворачивании приложения
-  tab: 'home',                          // открытая вкладка пульта
+  tab: 'pult',                          // открытый раздел пульта
+  patOpen: false,                        // сетка готовых рисунков развёрнута целиком
+  patRecent: [],                         // последние сыгранные рисунки — они стоят первыми
   gain: 1,                               // усиление того, что назначили теги/аналитик/эвристика
   capOwn: 0,                             // свой потолок силы, 0 — как в настройках плагина
   denySec: 2,                            // сколько длится отказ на пике, секунды
@@ -116,7 +119,8 @@ var DEF = {
   patLoop: true,                         // паттерн и свой ритм крутятся по кругу до СТОП
   patLast: '',                           // последний выбранный паттерн — для подписи
   toyKind: {},                           // что за игрушка, выбрано руками: { имя: { k, air } }
-  toyTell: true,                         // рассказывать персонажу, какая игрушка подключена
+  toyTell: true,                         // (старое) рассказывать персонажу про игрушку — теперь toyMode
+  toyMode: 1,                            // персонаж знает об игрушке: 0 — нет, 1 — если она уже в сцене, 2 — всегда
   hintOn: true,                          // вторая модель подсказывает, куда вести следующий ответ
   everConnected: false                   // игрушка уже подключалась — экран первого входа не нужен
 };
@@ -134,6 +138,8 @@ function queueToLanes(bag){
 }
 queueToLanes(C);
 delete C.queue;
+// тумблер «рассказать про игрушку» выключали — значит, персонаж не должен о ней знать и теперь
+if (C.toyMode === undefined && C.toyTell === false) C.toyMode = 0;
 /* Раньше плагин глушил игрушку, едва свернёшь приложение, и включено это было
    по умолчанию. В сцене это читается как обрыв: ответ ещё пишется, а игрушка
    уже замолчала. Теперь наоборот — один раз переставляем и у тех, кто ставил
@@ -162,6 +168,9 @@ function VAPI(){
 
 function saveCfg(){
   lsSet('pv_cfg_v1', C);                       // мгновенно, чтобы ничего не терялось между тактами
+  // Настройки закреплены за чатом — пишем и туда. Иначе «кто ведёт сцену» или характер,
+  // переключённые не через общие чипы, при следующем открытии чата возвращались назад.
+  if (C.perChat && chatId) saveChatCfg();
   clearTimeout(varTimer);
   varTimer = setTimeout(function(){
     var V = VAPI(); if (!V) return;
@@ -201,7 +210,7 @@ function loadCfgFromTavo(){
    поэтому уходит только «vibe, anon, версия» — ни ника, ни настроек, ни
    предпочтений, ни названия игрушки. На стенде без Таво не стучимся, чтобы
    проверки не считались живыми людьми. */
-var PV_VERSION = '1.15.1';
+var PV_VERSION = '1.16.3';
 (function(){
   function beat(){
     if (!TV()) return;
@@ -717,7 +726,9 @@ function activeLevels(){
      только без промпта, без разметки в тексте и без правок в пресете. */
   if (!E.overlay && E.flow && E.flow.until > now()){
     var возраст = now() - E.flow.at;
-    var k = 1 - 0.55 * clamp(возраст / 9000, 0, 1);        // плавно затухает
+    // Накал от слов плавно затухает. А игрушку, которую в сцене выставили на уровень,
+    // никто не убавлял — она так и стоит, как рука на регуляторе.
+    var k = E.flow.hold ? 1 : 1 - 0.55 * clamp(возраст / 9000, 0, 1);
     o[mainChannel()] = E.flow.level * k;
     return o;
   }
@@ -884,7 +895,7 @@ function engineTick(){
 
   // Для капризных игрушек огрубляем шкалу вдвое: 0,2,4… Нарастание на слух то же,
   // а команд по Bluetooth в разы меньше — рвать связь становится нечему.
-  if (fragileToy() || C.gentle){
+  if ((fragileToy() || C.gentle) && !(E.manual > 0) && !E.mine){
     КАН.forEach(function(c){
       if (out[c] > 0) out[c] = Math.max(1, Math.round(out[c] / 2) * 2);
     });
@@ -981,6 +992,19 @@ function playProgram(steps, fromIdx, opts){
   E.flow = { level: 0, until: 0, at: 0 };        // и главнее живого отклика на печать
   E.prog = steps;
   E.i = clamp(fromIdx || 0, 0, steps.length - 1);
+  /* Новый ответ — новая программа, и начинается она с разгона. Если игрушка в
+     этот момент работала, разгон читается как обрыв: только что было хорошо, и
+     вдруг почти тишина. Поэтому первый шаг новой сцены начинаем не ниже того,
+     что играет прямо сейчас, — дальше он всё равно идёт туда, куда задумано. */
+  if (!(opts && opts.mine) && steps[E.i]){
+    var живой = Math.max(E.live.v || 0, E.live.r || 0, E.live.s || 0, E.live.t || 0, E.live.p || 0);
+    if (живой > 0){
+      var шаг = steps[E.i], кан = mainChannel();
+      var старт = шаг[кан] || 0, цель = (шаг.to && шаг.to[кан] != null) ? шаг.to[кан] : старт;
+      var подхват = Math.min(живой * 0.85, Math.max(старт, цель));
+      if (подхват > старт) шаг[кан] = подхват;
+    }
+  }
   E.stepEnd = now() + (steps[E.i] ? steps[E.i].ms : 0);
   E.manual = 0;
   // Своеволие уместно в сцене, но не там, где ты задала ритм сама.
@@ -1158,10 +1182,62 @@ var PRESETS = {
   'прибой':   function(a, sec){ var out = [], n = Math.max(1, Math.round(sec / 10)); for (var i = 0; i < n; i++){ out.push(step({ v: 4, to: { v: a } }, 7)); out.push(step({ v: a }, 2)); out.push(step({ v: 0 }, 1)); } return out; },
   'сердцебиение': function(a, sec){ var out = [], n = Math.max(2, Math.round(sec / 1.4)); for (var i = 0; i < n; i++){ out.push(step({ v: a }, 0.25), step({ v: 0 }, 0.15), step({ v: a }, 0.25), step({ v: 0 }, 0.75)); } return out; },
   'фейерверк': function(a, sec){ var out = [], n = Math.max(2, Math.round(sec / 1.2)); for (var i = 0; i < n; i++){ out.push(step({ v: Math.round(a * (0.4 + Math.random() * 0.6)) }, 0.4 + Math.random() * 0.5), step({ v: Math.round(a * 0.2) }, 0.3)); } return out; },
-  'дразнилка': function(a, sec){ var out = [], n = Math.max(1, Math.round(sec / 8)); for (var i = 0; i < n; i++){ out.push(step({ v: 4, to: { v: a } }, 5), step({ v: 0 }, 3)); } return out; }
+  'дразнилка': function(a, sec){ var out = [], n = Math.max(1, Math.round(sec / 8)); for (var i = 0; i < n; i++){ out.push(step({ v: 4, to: { v: a } }, 5), step({ v: 0 }, 3)); } return out; },
+
+  /* ── ровные: для долгой игры, когда нужен фон, а не событие ── */
+  'тихо и ровно':  function(a){ return [step({ v: П(a, 0.3) }, 10)]; },
+  'рябь':          function(a){ var lo = П(a, 0.4), hi = П(a, 0.55); return [step({ v: lo, to: { v: hi } }, 1), step({ v: hi, to: { v: lo } }, 1)]; },
+  'высокая рябь':  function(a){ var lo = П(a, 0.75), hi = П(a, 0.95); return [step({ v: lo, to: { v: hi } }, 1), step({ v: hi, to: { v: lo } }, 1)]; },
+
+  /* ── волны и приливы ── */
+  'гребни':        function(a){ return [step({ v: П(a, 0.15), to: { v: a } }, 2), step({ v: a, to: { v: П(a, 0.15) } }, 1)]; },
+  'частые гребни': function(a){ return [step({ v: П(a, 0.3), to: { v: a } }, 0.5), step({ v: a, to: { v: П(a, 0.3) } }, 0.5)]; },
+  'прилив':        function(a){ var lo = П(a, 0.55); return [step({ v: lo, to: { v: a } }, 2.5), step({ v: a, to: { v: lo } }, 2.5)]; },
+  'отлив':         function(a){ var lo = П(a, 0.15), hi = П(a, 0.45); return [step({ v: lo, to: { v: hi } }, 2.5), step({ v: hi, to: { v: lo } }, 2.5)]; },
+  'нарастающий прилив': function(a){
+    var out = [];
+    [0.35, 0.55, 0.75, 1].forEach(function(k){ out.push(step({ v: П(a, k * 0.4), to: { v: П(a, k) } }, 1.5), step({ v: П(a, k), to: { v: П(a, k * 0.4) } }, 1.5)); });
+    return out;
+  },
+  'цунами':        function(a){ return [step({ v: П(a, 0.2), to: { v: a } }, 8), step({ v: a }, 3), step({ v: 0 }, 2)]; },
+
+  /* ── ступени и горки ── */
+  'горки':         function(a){ return [step({ v: П(a, 0.2), to: { v: a } }, 3), step({ v: П(a, 0.2) }, 0.5)]; },
+  'лесенка':       function(a){ return [П(a, 0.25), П(a, 0.5), П(a, 0.75), a].map(function(v){ return step({ v: v }, 2.5); }).concat([step({ v: 0 }, 1)]); },
+  'молот':         function(a){ return [a, П(a, 0.75), П(a, 0.5), П(a, 0.25)].map(function(v){ return step({ v: v }, 2); }).concat([step({ v: 0 }, 1)]); },
+  'нырок':         function(a){ return [step({ v: a }, 4), step({ v: П(a, 0.2) }, 4)]; },
+  'вишенка':       function(a){ var lo = П(a, 0.35); return [step({ v: lo }, 3), step({ v: lo, to: { v: a } }, 1.5), step({ v: a, to: { v: lo } }, 1.5), step({ v: lo }, 3)]; },
+  'прыжок':        function(a){ return [step({ v: П(a, 0.3) }, 1), step({ v: П(a, 0.55) }, 1), step({ v: П(a, 0.3) }, 0.5), step({ v: a }, 1.5), step({ v: 0 }, 1)]; },
+
+  /* ── ритмы ── */
+  // зубцы стены: две башни разной высоты и провал — чтобы не путать с «нырком», у которого квадрат ровный
+  'замок':         function(a){ return [step({ v: a }, 1), step({ v: П(a, 0.5) }, 1), step({ v: a }, 1), step({ v: П(a, 0.15) }, 1)]; },
+  'ча-ча-ча':      function(a){ return [step({ v: a }, 0.5), step({ v: 0 }, 0.5), step({ v: a }, 0.5), step({ v: 0 }, 0.5), step({ v: a }, 0.5), step({ v: 0 }, 1.5)]; },
+  'батут':         function(a){ var hi = П(a, 0.85); return [step({ v: hi }, 1.5), step({ v: П(a, 0.4) }, 0.5), step({ v: hi }, 1.5), step({ v: П(a, 0.4) }, 0.5), step({ v: a }, 1)]; },
+  'зайчик':        function(a){ return [step({ v: a }, 0.5), step({ v: П(a, 0.2) }, 0.5), step({ v: a }, 0.5), step({ v: 0 }, 1.5)]; },
+  'разгон':        function(a){
+    // толчки всё чаще: от полутора секунд между ними до полусекунды
+    var out = [];
+    [1.5, 1.2, 1, 0.8, 0.6, 0.5, 0.5, 0.5].forEach(function(пауза){ out.push(step({ v: a }, 0.5), step({ v: П(a, 0.15) }, пауза)); });
+    return out;
+  },
+  'корона':        function(a){ return [П(a, 0.5), a, П(a, 0.4), П(a, 0.8), П(a, 0.4), a, П(a, 0.5)].map(function(v){ return step({ v: v }, 0.5); }).concat([step({ v: П(a, 0.2) }, 1.5)]); },
+
+  /* ── вспышки ── */
+  'искра':         function(a){ return [step({ v: П(a, 0.25) }, 2), step({ v: a }, 0.5), step({ v: П(a, 0.25) }, 2)]; },
+  'гром':          function(a){ return [step({ v: П(a, 0.2) }, 3), step({ v: a }, 1), step({ v: 0 }, 0.5), step({ v: a }, 0.5), step({ v: П(a, 0.2) }, 2)]; },
+  'большой взрыв': function(a){ return [step({ v: П(a, 0.1), to: { v: П(a, 0.7) } }, 6), step({ v: a }, 0.5), step({ v: П(a, 0.3) }, 0.5), step({ v: a }, 0.5), step({ v: П(a, 0.3) }, 0.5), step({ v: a }, 2), step({ v: 0 }, 2)]; },
+  'шалость':       function(a){ return [П(a, 0.6), П(a, 0.2), П(a, 0.9), П(a, 0.4), a, П(a, 0.3), П(a, 0.7)].map(function(v){ return step({ v: v }, 0.5); }).concat([step({ v: 0 }, 1)]); }
 };
+
+// доля от потолка, но не ниже единицы: иначе на низком потолке рисунок пропадает
+function П(a, k){ return Math.max(1, Math.round(a * k)); }
 var PRESET_ALIAS = { wave: 'волна', pulse: 'пульс', crescendo: 'крещендо', surf: 'прибой', heartbeat: 'сердцебиение',
-  fireworks: 'фейерверк', tease: 'дразнилка', earthquake: 'фейерверк', 'волны': 'волна', 'пульсация': 'пульс' };
+  fireworks: 'фейерверк', tease: 'дразнилка', earthquake: 'фейерверк', 'волны': 'волна', 'пульсация': 'пульс',
+  steady: 'тихо и ровно', ripple: 'рябь', crests: 'гребни', tide: 'прилив', tsunami: 'цунами',
+  steps: 'лесенка', stairs: 'лесенка', hammer: 'молот', dive: 'нырок', castle: 'замок', trampoline: 'батут',
+  bunny: 'зайчик', accelerator: 'разгон', crown: 'корона', spark: 'искра', thunder: 'гром', 'big bang': 'большой взрыв',
+  'ступеньки': 'лесенка', 'шторм': 'гром', 'взрыв': 'большой взрыв' };
 
 /* Паттерны считают свои циклы прикидкой, а минимальный шаг — полсекунды, поэтому
    «пульс» на минуту выходил на 66 секунд. Раз время теперь выставляет пользователь,
@@ -1205,7 +1281,32 @@ var PRESET_WHAT = {
   'прибой':       'семь секунд накат до потолка, две секунды держит, секунда полной тишины',
   'сердцебиение': 'тук-тук — два коротких удара и пауза почти на секунду',
   'фейерверк':    'рвано и случайно: каждый раз новая сила и новая длительность',
-  'дразнилка':    'пять секунд вверх почти до потолка — и три секунды в ноль'
+  'дразнилка':    'пять секунд вверх почти до потолка — и три секунды в ноль',
+  'тихо и ровно': 'ровный тихий фон без изменений — для долгой игры',
+  'рябь':         'средняя сила, чуть покачивается вверх-вниз',
+  'высокая рябь': 'почти на потолке и чуть покачивается — держит, не отпуская',
+  'гребни':       'острые пики: две секунды вверх, секунда вниз',
+  'частые гребни':'те же пики, но часто — по полсекунды',
+  'прилив':       'большие мягкие волны, не опускаясь ниже середины',
+  'отлив':        'маленькие мягкие волны внизу шкалы — нежно',
+  'нарастающий прилив': 'четыре волны, каждая выше предыдущей',
+  'цунами':       'восемь секунд накатывает, три держит на потолке — и две тишины',
+  'горки':        'медленный подъём и резкий сброс вниз, снова и снова',
+  'лесенка':      'четыре ступени вверх по две с половиной секунды и короткая пауза',
+  'молот':        'наоборот: удар сразу на полную и ступенями вниз',
+  'нырок':        'четыре секунды сильно — четыре секунды почти тишины',
+  'вишенка':      'ровно и мягко, а посередине — один сладкий пик',
+  'прыжок':       'разбег в два шага, короткий присед — и прыжок на полную',
+  'замок':        'зубцы стены по секунде: сильно — средне — сильно — почти тишина',
+  'ча-ча-ча':     'три коротких толчка и пауза — как танцевальный счёт',
+  'батут':        'пружинит: держит высоко, короткий провал, снова вверх',
+  'зайчик':       'два быстрых подскока и пауза',
+  'разгон':       'толчки всё чаще и чаще, пока не сольются',
+  'корона':       'зубцы разной высоты — неровно, как корона',
+  'искра':        'тихий фон и внезапная короткая вспышка',
+  'гром':         'затишье, удар, провал и второй удар',
+  'большой взрыв':'долгий разгон, серия вспышек и полный выброс на потолке',
+  'шалость':      'беспорядочно прыгает по всей шкале — не угадать'
 };
 
 function parseAttrs(s){
@@ -1319,8 +1420,38 @@ function кемЗовут(){
    вакуумная, у которой нечего «вводить». Плюс подсказываем, какими словами
    персонаж может её включать — плагин эти слова понимает. */
 var toyToldAt = 0;
+
+/* Игрушка в сцене — это когда о ней уже написано: в переписке или в карточке
+   персонажа. Слова строже, чем для команд: «пульт от телевизора» и «вибрация
+   телефона» сюда не должны попадать. */
+var TOY_SCENE_RE = new RegExp('(?:вибратор|игрушк|вибропул|виброяйц|массаж[её]р|стимулятор|мастурбатор|вибрирующ)[а-яё]*', 'i');   // СЛ объявлен ниже — здесь его ещё нет
+var игрушкаВЧате = false, игрушкаВКарточке = false;
+function toyInScene(){ return игрушкаВЧате || игрушкаВКарточке; }
+// Есть ли игрушка в сцене — по последним сообщениям обеих сторон.
+function toyInChatFrom(all){
+  var была = игрушкаВЧате;
+  игрушкаВЧате = (all || []).slice(-30).some(function(x){ return TOY_SCENE_RE.test(String(x.content || x.text || '')); });
+  if (была !== игрушкаВЧате){ buildPrompt(); paintToyMode(); }
+}
+// При открытии чата: сообщений ещё не приходило, а игрушка в переписке уже может быть.
+function checkToyInChat(){
+  var T = TV();
+  if (!T || !T.message || !T.message.find) return;
+  Promise.resolve(T.message.find()).then(toyInChatFrom).catch(function(){});
+}
+function checkToyInCard(){
+  игрушкаВКарточке = false;
+  getChar().then(function(ch){ игрушкаВКарточке = TOY_SCENE_RE.test(cardText(ch)); buildPrompt(); paintToyMode(); }).catch(function(){});
+}
+
 function toyPrompt(ход){
-  if (!C.toyTell || !D || D.state !== 'on') return '';
+  /* Персонаж узнаёт о настоящей игрушке только отсюда. Если игрушки в сцене нет,
+     а управляет ею сама пользовательница или плагин по тексту, персонаж не должен
+     вдруг достать её посреди разговора — поэтому по умолчанию рассказываем о ней,
+     только когда она уже появилась в переписке или в карточке. */
+  var режим = C.toyMode == null ? 1 : +C.toyMode;
+  if (режим === 0 || !D || D.state !== 'on') return '';
+  if (режим === 1 && !toyInScene()) return '';
   var caps = toyCaps();
   if (!caps.known) return '';
   // Не каждый ответ: впервые после подключения, в горячей сцене и изредка между ними.
@@ -1720,7 +1851,9 @@ var DEV_LVL = [
 
 var DEV_ORD = new RegExp('(перв|втор|трет|четв[ёе]рт|пят)' + СЛ +
   '\\s+(?:скорост|режим|уровен|ступен|позици)' + СЛ, 'gi');
-var DEV_PCT = new RegExp('(\\d{1,3})\\s*(?:%|процент' + СЛ + ')', 'gi');
+// «на 60%», «до семидесяти процентов». Голое «0%» не берём: это строка чьей-то
+// статистики под ответом («attachment: 0%»), а не игрушка, выкрученная в ноль.
+var DEV_PCT = new RegExp('(?:на|до)\\s+(\\d{1,3})\\s*(?:%|процент' + СЛ + ')', 'gi');
 var ORD_N = { 'перв': 1, 'втор': 2, 'трет': 3, 'четвёрт': 4, 'четверт': 4, 'пят': 5 };
 
 // Названия режимов совпадают с готовыми паттернами — грех не воспользоваться.
@@ -1730,7 +1863,13 @@ var DEV_PRESET = [
   { p: 'крещендо',     re: new RegExp('крещендо|нарастающ' + СЛ, 'gi') },
   { p: 'прибой',       re: new RegExp('прибо' + СЛ, 'gi') },
   { p: 'сердцебиение', re: new RegExp('сердцебиен' + СЛ + '|как\\s+сердце', 'gi') },
-  { p: 'дразнилка',    re: new RegExp('дразнящ' + СЛ, 'gi') }
+  { p: 'дразнилка',    re: new RegExp('дразнящ' + СЛ, 'gi') },
+  { p: 'цунами',       re: new RegExp('цунами', 'gi') },
+  { p: 'лесенка',      re: new RegExp('лесенк' + СЛ + '|ступенями|ступеньк' + СЛ, 'gi') },
+  { p: 'разгон',       re: new RegExp('разгон' + СЛ + '|всё\\s+чаще|все\\s+чаще', 'gi') },
+  { p: 'гром',         re: new RegExp('гром' + СЛ + '|молни' + СЛ, 'gi') },
+  { p: 'рябь',         re: new RegExp('ряб' + СЛ, 'gi') },
+  { p: 'прилив',       re: new RegExp('прилив' + СЛ, 'gi') }
 ];
 
 /* Ищем по предложениям, а не по окну в символах. «Вибратор лежал в ящике.
@@ -1775,10 +1914,29 @@ function deviceActOf(text){
     'вполсилы|наполовину|\\d{1,3}\\s*(?:%|процент)|(?:перв|втор|трет|четв|пят)' + СЛ +
     '\\s+(?:скорост|режим|уровен|ступен)', 'i');
 
+  var учили = !!(toyToldAt > 0 && D && D.state === 'on');
+  var РЕЧЬ = /[«"“„]|(?:^|\s)[—–]\s/;
+
+  /* Режим, названный вслух — «"Волна", — произнёс он, нажимая кнопку», — это
+     команда, как и «на вторую скорость». И она главнее описания рядом: дальше
+     в тексте «вибрация перешла в пульсирующий цикл» — это он так описал волну,
+     а не переключил на пульс. */
+  var режимВслух = null;
+  var вслух = function(ф){
+    if (!(учили && РЕЧЬ.test(ф))) return null;
+    // только то, что внутри кавычек или после тире, — не описание вокруг
+    var речь = (ф.match(/[«"“„][^»"”“]*[»"”“]?/g) || []).join(' ') + ' ' + ((/^\s*[—–]\s([^—–]*)/.exec(ф) || [])[1] || '');   // реплика с тире в начале, а не «— произнёс он»
+    for (var q = 0; q < DEV_PRESET.length; q++) if (ищем(DEV_PRESET[q].re, речь).length) return DEV_PRESET[q].p;
+    return null;
+  };
+
   for (var s = 0; s < куски.length; s++){
     var фраза = куски[s];
     var своё = ищем(DEV_RE, фраза).length > 0;
-    var можно = своё || (былоУстройство && (МЕСТ.test(фраза) || СИЛА.test(фраза)));
+    var названо = вслух(фраза);
+    if (названо){ режимВслух = названо; if (!акт) акт = 'вкл'; }
+    var можно = своё || (былоУстройство && (МЕСТ.test(фраза) || СИЛА.test(фраза))) ||
+                (учили && РЕЧЬ.test(фраза) && СИЛА.test(фраза));
     былоУстройство = своё;
     if (!можно) continue;
 
@@ -1810,6 +1968,7 @@ function deviceActOf(text){
   }
 
   if (!акт) return null;
+  if (режимВслух && акт !== 'выкл') режим = режимВслух;
   return { act: акт, level: уровень, preset: режим };
 }
 
@@ -1828,7 +1987,7 @@ function heuristic(text){
   var h = heatOf(text), cap = capLevel();
   if (h.hits < 2 || !h.top) return null;
   var target = Math.min(cap, h.top + (h.hits > 6 ? 2 : 0));
-  var base = Math.max(2, Math.round(target * 0.35));
+  var base = Math.max(2, Math.round(target * 0.5));
   // Играем на том канале, который у игрушки вообще есть: вибропуля вибрирует,
   // вакуумная — сосёт, машина — толкается.
   var c = mainChannel();
@@ -1904,7 +2063,7 @@ function analystSys(){
   extra +
   '<vibe:wave from="A" to="B" t="СЕК"/> — плавное нарастание от A к B\n' +
   '<vibe:pulse v="X" on="0.6" off="0.4" t="СЕК"/> — пульсация\n' +
-  '<vibe:preset name="волна|пульс|крещендо|прибой|сердцебиение|дразнилка" t="СЕК"/>\n' +
+  '<vibe:preset name="' + Object.keys(PRESETS).join('|') + '" t="СЕК"/>\n' +
   '<vibe:stop/> — тишина\n\n' +
   'Правила:\n' +
   '1. Если в сцене нет физической близости или напряжения — ответь ровно <vibe:stop/> и ничего больше.\n' +
@@ -1916,7 +2075,8 @@ function analystSys(){
     ? '5. Последней строкой — <hint>…</hint>: одно предложение для рассказчика, куда вести следующий ответ. ' +
       'Смотри, что уже было, и предложи другое: сменить темп, задержаться, отступить, сменить положение или того, кто ведёт, ' +
       'вплести одну из предпочтений, если они даны. Если близость только началась — не торопить к финалу. ' +
-      'Если сцена не интимная — <hint></hint> пустой. Без имён плагинов и без слов «игрушка управляется».\n' +
+      'Если сцена не интимная — <hint></hint> пустой. Без имён плагинов и без слов «игрушка управляется».' +
+      ((C.toyMode == null ? 1 : +C.toyMode) === 2 || toyInScene() ? '' : ' Не предлагай вводить в сцену игрушки или устройства — их там нет.') + '\n' +
       '6. Никакого текста, кроме команд и этой строки.'
     : '5. Никакого текста, кроме команд.');
 }
@@ -1930,7 +2090,12 @@ function analystInput(plain){
     if (her.length) пред.push(NAMES.char + ': ' + her.map(function(x){ return x.name; }).join(', '));
     if (mine.length) пред.push(кемЗовут() + ': ' + mine.map(function(x){ return x.name; }).join(', '));
   } catch(e){}
-  return (мне ? 'Сообщение пользователя:\n' + мне + '\n\n' : '') +
+  var сама = (моя && now() - моя.at < 10 * 60000)
+    ? 'Игрушку в своём сообщении выставила сама пользовательница: ' +
+      (моя.level ? (моя.preset ? 'режим «' + моя.preset + '», ' : '') + моя.level + '/20' : 'выключила') +
+      '. Если персонаж её не трогал — программа держится около этого уровня (±3), а не ниже.\n\n'
+    : '';
+  return (мне ? 'Сообщение пользователя:\n' + мне + '\n\n' : '') + сама +
          'Ответ персонажа:\n' + plain +
          (C.hintOn && пред.length ? '\n\nПредпочтения — ' + пред.join('; ') : '');
 }
@@ -1943,8 +2108,11 @@ function runBrain(key, text){
   // всё равно некуда деть, и не помечаем ответ разобранным.
   if (E.mine){ log('brain', 'играет твой ритм — сцену не разбираю'); return; }
   brainKey = key;
-  var plain = String(text || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(-1800);
+  var plain = безПлашек(сценыТекст(text)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(-1800);
   if (!plain) return;
+
+  // Игрушку в сцене выставили или выключили — это и есть программа, спрашивать не о чем.
+  if (сценаИгрушки(plain, key)) return;
 
   if (C.brain !== 'model'){
     var steps = heuristic(plain);
@@ -1983,6 +2151,18 @@ function runBrain(key, text){
     var steps = [];
     for (var i = 0; i < cmds.length; i++) steps = steps.concat(cmds[i]);
     var quiet = steps.length === 1 && !steps[0].v && !steps[0].r && !steps[0].s && !steps[0].t;
+    /* Игрушку в этом ходе выставила ты, а персонаж её не трогал. Модель-аналитик
+       любит «начать с тихого» и на третьей скорости выдавала 3–4. Твоё главнее:
+       ниже трёх четвертей твоего уровня программа не опускается. */
+    var твоя = моя && моя.level ? моя.level : 0;         // «моя» живёт один ход: новое сообщение её сбрасывает
+    if (твоя){
+      var пол = Math.max(1, Math.round(твоя * 0.75));
+      steps.forEach(function(ш){
+        ш.v = Math.max(ш.v || 0, пол);
+        if (ш.to && ш.to.v != null) ш.to.v = Math.max(ш.to.v, пол);
+      });
+      quiet = false;
+    }
     if (quiet){ allStop('аналитик: сцена спокойная'); log('brain', 'сцена спокойная — тишина'); return; }
     playProgram(steps, 0);
     log('brain', 'программа на ' + steps.length + ' шаг(ов), старт с ' + Math.round(steps[0].v) + '/20');
@@ -1998,16 +2178,22 @@ function runBrain(key, text){
 /* ═══════════════ слежение за сообщениями ═══════════════ */
 
 var lastMsgKey = '', lastCmdCount = 0, msgTimer = null, lastMeKey = '', lastMsgLen = 0;
-var fbTimer = null, fbKey = '';
+var fbTimer = null, fbKey = '', calmKey = '';
 var flowKey = '', flowPos = 0;
 
 /* Скользим по свежему куску ответа и отзываемся на то, что в нём появилось.
    Считается по тому же словарю, что и разбор целой сцены. */
 function flowScan(key, text){
   if (!C.flowLive) return;
+  // Модель ещё размышляет перед ответом («WHO: … PLAN: …» или <think>), а закрывающего
+  // тега пока нет. Отзываться на её план — значит играть сцену, которой ещё нет.
+  if (!/<\/(?:think|thinking|reasoning)>/i.test(text) &&
+      /^\s*(?:<(?:think|thinking|reasoning)>|[A-Z][A-Z _]{1,20}:)/.test(text)) return;
+  text = безПлашек(сценыТекст(text));
   if (!(E.aiOn && host().aiControl) || !D || D.state !== 'on') return;
   if (E.mine) return;                       // сейчас играет то, что ты нажала рукой
-  if (key !== flowKey){ flowKey = key; flowPos = 0; }
+  // Новый ответ — прежняя «рука на регуляторе» больше не держит: сцену ведёт он.
+  if (key !== flowKey){ flowKey = key; flowPos = 0; E.flow.hold = false; }
   // Свайп или регенерация: номер тот же, а текст начался заново и стал короче.
   // Без сброса позиции живой отклик на переписанный ответ молчал бы до конца.
   if (text.length < flowPos) flowPos = 0;
@@ -2043,8 +2229,9 @@ function flowScan(key, text){
       return;
     }
     E.flow.level = ур;
-    E.flow.until = now() + 14000;                      // рука на регуляторе держится дольше слова
+    E.flow.until = now() + 60000;                      // рука на регуляторе: стоит, пока не тронут
     E.flow.at = now();
+    E.flow.hold = true;
     E.waiting = 0;
     log('flow', 'в сцене ' + (вещь.act === 'выше' ? 'прибавил' : вещь.act === 'ниже' ? 'убавил' : 'включил') +
         ' → ' + ур + '/20');
@@ -2065,11 +2252,15 @@ function flowScan(key, text){
     if (приказ === 'стоп')   E.flow.level = 0;
     E.flow.until = now() + (приказ === 'стоп' ? 5000 : 12000);
     E.flow.at = now();
+    E.flow.hold = false;
     E.waiting = 0;
     log('flow', 'команда «' + приказ + '» → ' + E.flow.level + '/20');
     startEngine();
     return;
   }
+
+  // Игрушку в сцене выставили на уровень — слова вокруг её не крутят, только новая команда.
+  if (E.flow.hold && E.flow.until > now()) return;
 
   var h = heatOf(chunk);
   if (!h.top) return;                                  // в новом куске ничего живого
@@ -2079,8 +2270,77 @@ function flowScan(key, text){
   E.flow.level = Math.max(Math.round(было * 0.75), цель);
   E.flow.until = now() + 9000;
   E.flow.at = now();
+  E.flow.hold = false;
   E.waiting = 0;
   startEngine();
+}
+
+/* Под ответом часто висит служебное: наш же блок [FETISH], строки статистики других
+   плагинов («chemistry: 8% attachment: 0% trust: 0%»), код. Для разбора сцены это
+   шум — «0%» рядом со словом «игрушка» читалось как «выкрутил в ноль». */
+function сценыТекст(t){
+  return String(t || '')
+    // Размышления модели перед ответом. Открывающий тег Таво часто съедает, и в
+    // тексте остаётся только «…план по-английски </think>» — режем всё до него.
+    .replace(/^[\s\S]*<\/(?:think|thinking|reasoning)>/i, ' ')
+    .replace(/<(think|thinking|reasoning)>[\s\S]*?(?:<\/\1>|$)/gi, ' ')
+    .replace(/\[([A-Z_]{2,})\][\s\S]*?\[\/\1\]/g, ' ')          // [FETISH], [HUD], [IM]… и похожие
+    .replace(/\[([A-Z_]{2,})\][\s\S]*$/, ' ')                    // такой же блок, ещё не дописанный
+    .replace(/```[\s\S]*?(?:```|$)/g, ' ')                     // код
+    .split('\n').filter(function(line){
+      // строка из пар «слово: число» — это чья-то панель, а не проза
+      return (line.match(/[A-Za-z_]+\s*:\s*-?\d+/g) || []).length < 2;
+    }).join('\n');
+}
+
+/* Плашки пресетов — это HTML внутри ответа: «ЭНЕРГИЯ 80%», «СТРЕСС 55%», монитор
+   с «напряжением в бёдрах». Разбор сцены их прозой не считает. Но бывает, что
+   весь ответ завёрнут в один div, — поэтому выкидываем блоки, только если
+   снаружи них остаётся сама проза. Курсив и жирный внутри прозы не трогаем. */
+function безПлашек(t){
+  t = String(t || '').replace(/<(style|script)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<\/?(?:b|i|em|strong|u|s|span|font|small|big|sup|sub|a|q|mark|br)\b[^>]*>/gi, '');
+  var снаружи = t, было;
+  do {
+    было = снаружи;
+    снаружи = снаружи.replace(/<([a-z][a-z0-9-]*)\b[^>]*>(?:(?!<\1\b)[\s\S])*?<\/\1>/gi, ' ');
+  } while (снаружи !== было);
+  снаружи = снаружи.replace(/<[^>]*>/g, ' ');
+  var проза = снаружи.replace(/\s+/g, ' ').trim();
+  return (проза.length >= 80 ? снаружи : t.replace(/<[^>]*>/g, ' '));
+}
+
+/* Что в дописанном ответе сделали с самой игрушкой. Это главнее любого накала:
+   «выключил и отложил» — тишина, «на максимум», «вторая скорость», режим — так
+   она и стоит до следующего ответа, настоящую игрушку никто не убавлял. Раньше
+   это держалось секунд десять по ходу печати, а потом ответ признавался
+   «спокойным», и игрушка падала на фон посреди «до упора». Возвращает true,
+   если сцену решила игрушка и разбирать дальше нечего. */
+function сценаИгрушки(plain, key){
+  var вещь = C.orders ? deviceActOf(plain) : null;
+  if (!вещь) return false;
+  if (вещь.act === 'выкл'){
+    fbKey = key;
+    allStop('в сцене игрушку выключили');
+    return true;
+  }
+  if (!(вещь.level != null || вещь.preset || вещь.act === 'вкл' || вещь.act === 'выше' || вещь.act === 'ниже')) return false;
+  var cap = capLevel();
+  var ур = вещь.level != null ? вещь.level
+         : (E.flow && E.flow.hold && E.flow.level) ? E.flow.level
+         : вещь.act === 'выше' ? clamp(Math.round(cap * 0.7), 2, cap)
+         : вещь.act === 'ниже' ? clamp(Math.round(cap * 0.25), 1, cap)
+         : clamp(Math.round(cap * 0.5), 2, cap);
+  fbKey = key;
+  E.flow = { level: 0, until: 0, at: 0 };
+  if (вещь.preset && PRESETS[вещь.preset]){
+    playProgram(makePreset(вещь.preset, ур, clamp(C.patSec, 30, 300)), 0);
+    log('brain', 'в сцене игрушка играет «' + вещь.preset + '» на ' + ур + '/20 — так и оставляю до ответа');
+  } else {
+    playProgram([step({ v: ур }, 60)], 0);
+    log('brain', 'в сцене игрушку оставили на ' + ур + '/20 — так и держу до ответа');
+  }
+  return true;
 }
 
 /* Гибрид: теги главные, но если их в ответе нет — сцену ведёт разбор по словам.
@@ -2092,22 +2352,54 @@ function fallbackByWords(key, text){
   // иначе после СТОП он так и остался бы неотыгранным.
   if (E.mine) return;
   if (parseCmds(text).length) return;                   // теги всё-таки появились
-  var plain = String(text || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  var plain = безПлашек(сценыТекст(text)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
-  /* Сцена кончилась тем, что игрушку выключили и отложили. Собирать по такому
-     ответу программу из накала — значит включить её обратно вопреки тексту. */
-  var вещь = C.orders ? deviceActOf(plain) : null;
-  if (вещь && вещь.act === 'выкл'){
-    fbKey = key;
-    allStop('в сцене игрушку выключили');
-    return;
-  }
+  if (сценаИгрушки(plain, key)) return;
 
   var steps = heuristic(plain);
-  if (!steps) return;                                   // сцена спокойная — молчим
+  if (!steps && моя && моя.level && E.prog.length){       // спокойный ответ — твоя игрушка стоит, как стояла
+    fbKey = key;
+    log('brain', 'ответ спокойный — игрушка стоит, как ты её выставила');
+    return;
+  }
+  if (!steps){                                          // сцена спокойная — молчим, но отмечаем
+    // разобранным не помечаем: отредактируют погорячее — перечитаем
+    if (calmKey !== key){ calmKey = key; log('brain', 'ответ прочитан: сцена спокойная — игрушку не трогаю'); }
+    return;
+  }
   fbKey = key;
   playProgram(steps, 0);
   log('brain', 'тегов нет — веду сцену по словам');
+}
+
+/* Ты сама в сцене взяла игрушку: «включаю вибратор на вторую скорость», «выключаю
+   его». Это не накал, а прямое действие с настоящей вещью — так она и стоит, пока
+   персонаж её не тронет. Модели о нём говорим отдельно (моя), иначе аналитик
+   строит свою программу поверх. Знание персонажа об игрушке тут ни при чём: это
+   твой ход, а не его. */
+var моя = null;
+function тыВзялаИгрушку(text){
+  var вещь = deviceActOf(безПлашек(сценыТекст(text)));
+  if (!вещь) return false;
+  if (вещь.act === 'выкл'){
+    моя = { level: 0, at: now() };
+    allStop('ты в сцене выключила игрушку');
+    E.devHold = now() + 8000;
+    return true;
+  }
+  if (!(вещь.level != null || вещь.preset || вещь.act === 'вкл' || вещь.act === 'выше' || вещь.act === 'ниже')) return false;
+  var cap = capLevel(), было = Math.round(Math.max(E.live.v || 0, E.live.r || 0, E.live.s || 0, E.live.t || 0));
+  var ур = вещь.level != null ? вещь.level
+         : вещь.act === 'выше' ? clamp(Math.max(было + 4, Math.round(cap * 0.6)), 2, cap)
+         : вещь.act === 'ниже' ? clamp(Math.round((было || cap * 0.5) * 0.5), 1, cap)
+         : clamp(Math.round(cap * 0.5), 2, cap);
+  моя = { level: ур, preset: вещь.preset || '', at: now() };
+  E.flow = { level: 0, until: 0, at: 0 };
+  if (вещь.preset && PRESETS[вещь.preset]) playProgram(makePreset(вещь.preset, ур, clamp(C.patSec, 30, 300)), 0);
+  else playProgram([step({ v: ур }, 60)], 0);
+  // «включаю» и «включи» тут одно и то же: игрушка твоя, и ждать ответа незачем
+  log('me', 'по твоему сообщению — ' + (вещь.preset ? '«' + вещь.preset + '» на ' : 'игрушка на ') + ур + '/20');
+  return true;
 }
 
 /* Короткий отклик на твоё сообщение: пока модель думает, сцена не молчит.
@@ -2131,6 +2423,7 @@ function readLast(){
   if (!T || !T.message || !T.message.find) return Promise.resolve();
   return Promise.resolve(T.message.find()).then(function(all){
     if (!all || !all.length) return;
+    toyInChatFrom(all);
     var m = all[all.length - 1];
     if (!m) return;
     var role = String(m.role || (m.isUser ? 'user' : '')).toLowerCase();
@@ -2148,7 +2441,10 @@ function readLast(){
         lastUserText = text;                        // режиссёру нужно знать, что ты написала
         buildPrompt(true);                          // новый ход: подсказки расходуются только здесь
         E.waiting = now();
-        if (C.reply && !E.mine){          // твой ритм важнее короткого отклика
+        моя = null;
+        if (!E.mine && тыВзялаИгрушку(text)){
+          // игрушку выставила ты — короткий отклик поверх был бы лишним
+        } else if (C.reply && !E.mine){          // твой ритм важнее короткого отклика
           var nod = replyToMe(text);
           if (nod) { playOverlay(nod); log('me', 'отклик на твоё сообщение'); }
         }
@@ -2444,7 +2740,13 @@ var КУСКИ = ['волна', 'пульс', 'прибой', 'дразнилк�
 var СИЛА_КУСКА = { 'мягко': 0.35, 'средне': 0.65, 'жёстко': 1 };
 var ВРЕМЯ_КУСКА = [30, 60, 120, 300];
 var КУСОК_КОД = { 'волна': 'w', 'пульс': 'p', 'прибой': 's', 'дразнилка': 'd', 'крещендо': 'c',
-                  'сердцебиение': 'h', 'фейерверк': 'f', 'тишина': 'z', 'ровно': 'r' };
+                  'сердцебиение': 'h', 'фейерверк': 'f', 'тишина': 'z', 'ровно': 'r',
+                  // новые — двумя буквами; старые коды из одной буквы читаются как раньше
+                  'тихо и ровно': 'tq', 'рябь': 'rb', 'высокая рябь': 'hr', 'гребни': 'gr', 'частые гребни': 'gq',
+                  'прилив': 'pr', 'отлив': 'ot', 'нарастающий прилив': 'np', 'цунами': 'cu', 'горки': 'go',
+                  'лесенка': 'le', 'молот': 'mo', 'нырок': 'ny', 'вишенка': 'vi', 'прыжок': 'pj',
+                  'замок': 'za', 'ча-ча-ча': 'cc', 'батут': 'ba', 'зайчик': 'zy', 'разгон': 'ra',
+                  'корона': 'ko', 'искра': 'is', 'гром': 'gm', 'большой взрыв': 'bv', 'шалость': 'sh' };
 var СИЛА_КОД = { 'мягко': 1, 'средне': 2, 'жёстко': 3 };
 
 function lanes(){
@@ -2557,7 +2859,7 @@ function applyRhythmCode(code){
     L = m2[1].split('~').slice(0, 2).map(function(part){
       var out = [];
       part.split('.').forEach(function(tok){
-        var x = /^([a-z])(\d{1,2})x(\d{1,3})$/i.exec(tok);
+        var x = /^([a-z]{1,2})(\d{1,2})x(\d{1,3})$/i.exec(tok);
         if (!x || out.length >= 12) return;
         var n = ОТ_КОДА[x[1].toLowerCase()]; if (!n) return;
         var b = { n: n, s: clamp(+x[3], 1, 600) };
@@ -2626,7 +2928,7 @@ function paintLanes(){
         '%;--a:' + blockAlpha(b).toFixed(2) + '"></i>';
     });
     h += '</div><div class="pv-chiprow">';
-    if (!L[li].length) h += '<span class="pv-tapeempty">' + (двое && C.laneTo !== li ? 'выбери «мотор ' + (li + 1) + '» ниже и добавляй куски' : 'нажимай куски выше — они встанут сюда') + '</span>';
+    if (!L[li].length) h += '<span class="pv-tapeempty">' + (двое && C.laneTo !== li ? 'выбери ниже «мотор ' + (li + 1) + '» и добавляй рисунки' : 'нажимай рисунки ниже — они встанут сюда') + '</span>';
     L[li].forEach(function(b, i){
       var sel = laneSel && laneSel.l === li && laneSel.i === i;
       h += '<div class="pv-blk' + (sel ? ' sel' : '') + (b.n === 'тишина' ? ' quiet' : '') + '" data-l="' + li + '" data-i="' + i + '"' +
@@ -2638,12 +2940,21 @@ function paintLanes(){
   if (!двое && L[1].length){
     h += '<div class="pv-hint" style="margin-top:6px">у игрушки один мотор — вторая дорожка сохранена и заиграет на двухмоторной</div>';
   }
-  if (двое){
-    h += '<div class="pv-lanepick"><span>куда добавлять:</span>' +
-      '<div class="pv-tab' + (!C.laneTo ? ' on' : '') + '" data-to="0">мотор 1</div>' +
-      '<div class="pv-tab' + (C.laneTo ? ' on' : '') + '" data-to="1">мотор 2</div></div>';
-  }
   box.innerHTML = h;
+  /* Куда добавлять — прямо над палитрой: выбрала мотор и тут же рисунок, без
+     прокрутки туда-обратно. Так мешап «первому цунами, второму горки» — это
+     четыре касания подряд. */
+  var куда = el('pv-addto');
+  if (куда){
+    куда.innerHTML = двое
+      ? '<div class="pv-lanepick" style="margin:0"><span>добавить на</span>' +
+        '<div class="pv-tab' + (!C.laneTo ? ' on' : '') + '" data-to="0">мотор 1</div>' +
+        '<div class="pv-tab' + (C.laneTo ? ' on' : '') + '" data-to="1">мотор 2</div></div>'
+      : 'добавить рисунок';
+    [].forEach.call(куда.querySelectorAll('[data-to]'), function(n){
+      n.addEventListener('click', function(){ C.laneTo = +n.getAttribute('data-to'); saveCfg(); paintLanes(); });
+    });
+  }
   [].forEach.call(box.querySelectorAll('.pv-blk'), function(n){
     n.addEventListener('click', function(){
       var l = +n.getAttribute('data-l'), i = +n.getAttribute('data-i');
@@ -2657,6 +2968,7 @@ function paintLanes(){
   });
   paintBlockEdit();
   paintSaved();
+  paintProgSum();
   var code = el('pv-q-code');
   if (code && pdoc.activeElement !== code) code.value = rhythmCode();
 }
@@ -2665,7 +2977,8 @@ function paintBlockEdit(){
   var box = el('pv-blkedit'); if (!box) return;
   var L = lanes();
   var b = laneSel && L[laneSel.l] && L[laneSel.l][laneSel.i];
-  if (!b){ laneSel = null; box.innerHTML = '<div class="pv-hint">нажми кусок на дорожке — здесь выберешь силу и время</div>'; return; }
+  if (!b){ laneSel = null; box.className = 'pv-blkedit pv-empty'; box.innerHTML = '<div class="pv-hint">нажми кусок на дорожке — выберешь силу и время</div>'; return; }
+  box.className = 'pv-blkedit';
   var двое = lanesTwo();
   var h = '<div class="pv-blkhead"><b>' + esc(blockTitle(b)) + '</b>' + (двое ? ' · мотор ' + (laneSel.l + 1) : '') + '</div>';
   if (b.n !== 'тишина' && b.n !== 'ровно'){
@@ -2744,6 +3057,11 @@ function css(){
     '#pv-dock{position:fixed;z-index:2147483000;width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;',
       'font-size:18px;color:#e8b0b8;background:linear-gradient(145deg,#251518,#140c10);',
       'border:1px solid rgba(200,100,120,.45);box-shadow:0 6px 18px rgba(0,0,0,.5);cursor:grab;user-select:none;touch-action:none;-webkit-tap-highlight-color:transparent}',
+    '#pv-dock{transition:opacity .25s}',
+    // Пока тихо, кнопка почти не видна — она же висит поверх чужой сцены.
+    // Прикоснулась или пошла игра — проявляется сама.
+    '#pv-dock.pv-dim{opacity:.5}',
+    '#pv-dock.pv-dim:hover,#pv-dock.pv-dim:active{opacity:1}',
     '#pv-dock.pv-live{border-color:rgba(220,120,140,.9);animation:pv-beat 1.2s infinite}',
     // Стоп рядом с кнопкой ≋: пока игрушка работает, его видно, не открывая пульт
     '#pv-stop2{position:fixed;z-index:2147483000;width:38px;height:38px;border-radius:50%;display:none;align-items:center;justify-content:center;',
@@ -2769,7 +3087,10 @@ function css(){
       'border-radius:20px;box-shadow:0 10px 30px rgba(0,0,0,.6);padding:14px 14px 8px;color:#e0c0c0;font-size:12px;line-height:1.45}',
     // окно с заданным размером: занимает всё, что дали, и тянется от верхнего края вниз
     '#pv-card.pv-fixed{box-sizing:border-box;width:var(--pv-cw);height:var(--pv-ch);max-width:none;max-height:none}',
-    '#pv-win.pv-sized{top:8px;bottom:8px}',
+    // В Таверне окну дают весь экран. В Таво на компьютере сверху шапка чата, а снизу
+    // строка ввода — они лежат поверх плагина и забирают клики: крестик и тумблер
+    // «персонаж» в шапке пульта не нажимались. Поэтому в Таво поля остаются.
+    (НА_СТ ? '#pv-win.pv-sized{top:8px;bottom:8px}' : '#pv-win.pv-sized{}'),
     '#pv-win.pv-sized.on{align-items:flex-start}',
     // уголок для растягивания: только там, где есть мышь
     '#pv-grip{position:absolute;right:2px;bottom:2px;width:20px;height:20px;cursor:nwse-resize;touch-action:none;',
@@ -2803,7 +3124,7 @@ function css(){
     '.pv-b.pv-ghost{border-color:rgba(200,100,120,.18);background:rgba(200,100,120,.05);color:#c08090}',
     '.pv-b.pv-red{border-color:rgba(220,80,60,.55);background:rgba(220,80,60,.16);color:#f0b8ac;font-weight:700}',
     '.pv-tabs{display:flex;gap:6px;flex-wrap:wrap}',
-    '.pv-tab{flex:1 1 44%;padding:9px 6px;border-radius:11px;text-align:center;font-size:11px;cursor:pointer;',
+    '.pv-tab{flex:1 1 44%;box-sizing:border-box;padding:9px 6px;border-radius:11px;text-align:center;font-size:11px;cursor:pointer;',
       'border:1px solid rgba(200,100,120,.18);background:rgba(200,100,120,.05);color:#c08090}',
     '.pv-tab.on{border-color:rgba(200,100,120,.6);background:rgba(200,100,120,.2);color:#f0d0d6;font-weight:600}',
 
@@ -2890,6 +3211,34 @@ function css(){
     '.pv-mt span{font-size:11px;color:#b09aa3;line-height:1.35}',
     '.pv-ask{text-align:center;font-size:11.5px;color:#b09aa3;letter-spacing:.04em;margin:2px 0 11px}',
     '#pv-backbar{display:flex;flex:none;padding:8px 0 2px}',
+    '#pv-main{position:relative}',
+    // док разделов
+    '.pv-dockbar{display:flex;gap:4px;flex:none;padding-top:7px;margin-top:4px;border-top:1px solid rgba(200,100,120,.12)}',
+    '.pv-dockbar button{flex:1;appearance:none;border:0;background:transparent;color:#a08088;border-radius:11px;',
+      'padding:6px 2px 5px;font:inherit;font-size:9.5px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px}',
+    '.pv-dockbar button u{text-decoration:none;font-size:17px;line-height:1}',
+    '.pv-dockbar button.on{background:rgba(200,100,120,.16);color:#f0d0d6}',
+    // свёрнутая сетка: два ряда, остальное по кнопке
+    '#pv-presets.pv-closed .pv-pat:nth-child(n+7){display:none}',
+    '.pv-morebtn{width:100%;margin-top:7px;padding:7px 10px;font-size:11px}',
+    // сводка своей программы
+    '.pv-psum{display:flex;gap:8px;align-items:baseline;padding:6px 0;border-bottom:1px solid rgba(200,100,120,.08);font-size:11.5px}',
+    '.pv-psum:last-child{border-bottom:none}',
+    '.pv-psum span{flex:none;width:58px;font-size:10px;color:#c08090}',
+    '.pv-psum b{font-weight:500;color:#e8c0c8;line-height:1.45}',
+    '.pv-psum i{font-style:normal;color:#8a6d78}',
+    // панелька своей программы
+    '#pv-sheet{position:absolute;left:0;right:0;bottom:0;z-index:5;display:flex;flex-direction:column;',
+      'background:linear-gradient(160deg,#1d1217,#140b10);border:1px solid rgba(200,100,120,.45);border-radius:16px;',
+      'box-shadow:0 -8px 28px rgba(0,0,0,.6);padding:10px 10px 8px}',
+    '#pv-sheet[hidden]{display:none}',
+    '.pv-sheethead{display:flex;align-items:center;justify-content:space-between;flex:none;margin-bottom:6px}',
+    '.pv-sheethead b{font-size:13px;color:#e8b0b8}',
+    '.pv-sheetbody{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-right:2px}',
+    '.pv-sheetfoot{flex:none;margin-top:8px;gap:6px}',
+    '.pv-sheetfoot .pv-b{padding:8px 9px}',
+    '#pv-pal{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}',
+    '#pv-addto{position:sticky;top:0;z-index:2;margin:10px 0 6px;padding:6px 0;background:#1b1116;border-bottom:1px solid rgba(200,100,120,.12)}',
     '#pv-backbar[hidden]{display:none}',
     '.pv-warn{border:1px solid rgba(217,160,90,.5);background:rgba(217,160,90,.11);border-radius:13px;',
       'padding:10px 11px;margin-bottom:11px;cursor:pointer}',
@@ -2924,6 +3273,15 @@ function css(){
     '.pv-link.on{background:rgba(200,100,120,.7);border-color:transparent;color:#fff}',
     // дорожки программы
     '.pv-pal .pv-tab{flex:0 0 auto;padding:7px 10px}',
+    // Готовые рисунки — сеткой по три, у каждого свой силуэт (подсмотрено у Satisfyer)
+    '#pv-presets{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}',
+    '.pv-pat{display:flex;flex-direction:column;align-items:center;gap:5px;padding:10px 4px 8px;border-radius:12px;cursor:pointer;',
+      'border:1px solid rgba(200,100,120,.18);background:rgba(200,100,120,.05);color:#c08090;font-size:10.5px;text-align:center;line-height:1.2}',
+    '.pv-pat svg{width:44px;height:18px;overflow:visible}',
+    '.pv-pat path{fill:none;stroke:#e8a0b0;stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke}',
+    '.pv-pat.on{border-color:rgba(200,100,120,.6);background:rgba(200,100,120,.2);color:#f0d0d6;font-weight:600}',
+    '.pv-pat.on path{stroke:#fff}',
+    '.pv-pat:active{transform:scale(.96)}',
     '.pv-lane{margin-top:10px;padding:8px;border-radius:12px;background:#0f090c;border:1px solid rgba(200,100,120,.15)}',
     '.pv-lanehead{display:flex;justify-content:space-between;font-size:10px;color:#c08090;margin-bottom:5px}',
     '.pv-lanehead span:last-child{color:#a08088}',
@@ -2944,6 +3302,7 @@ function css(){
     '.pv-lanepick .pv-tab{flex:0 0 auto;padding:6px 12px}',
     '.pv-blkedit{margin-top:10px;padding:10px;border-radius:12px;background:#0f090c;border:1px solid rgba(200,100,120,.18)}',
     '.pv-blkhead{font-size:12px;color:#e8c0c8}',
+    '.pv-blkedit.pv-empty{padding:2px 2px 0;background:none;border:0;margin-top:6px}',
     '.pv-blkedit .pv-tab{flex:1 1 0;padding:7px 4px}',
     '.pv-blkhead b{color:#fff}',
     '.pv-saved{display:flex;flex-wrap:wrap}',
@@ -3019,6 +3378,19 @@ function css(){
 
 function el(id){ return pdoc.getElementById(id); }
 
+var стопБыл = 0;
+function стопНа(n, причина){
+  if (!n) return;
+  var жми = function(e){
+    if (e){ try { e.stopPropagation(); } catch(_){} }
+    if (now() - стопБыл < 700) return;      // нажатие и следующий за ним клик — один стоп
+    стопБыл = now();
+    panic(причина);
+  };
+  n.addEventListener('pointerdown', жми);
+  n.addEventListener('click', жми);
+}
+
 function buildDock(){
   if (el('pv-dock')) return;
   var ic = pdoc.createElement('div');
@@ -3058,7 +3430,7 @@ function buildDock(){
   var sp = pdoc.createElement('div');
   sp.id = 'pv-stop2'; sp.textContent = 'СТОП';
   (pdoc.documentElement || pdoc.body).appendChild(sp);
-  sp.addEventListener('click', function(e){ e.stopPropagation(); panic('кнопка рядом с ≋'); });
+  стопНа(sp, 'кнопка рядом с ≋');
   watchInsets();
 }
 
@@ -3173,29 +3545,42 @@ function buildWin(){
 
     '<div id="pv-body">' +
 
-    /* ── меню ──
-       Сначала выбираешь, куда идти, и рядом сразу написано, что там лежит.
-       Четыре вкладки внизу называли себя, но не объясняли; тут — название
-       плюс строчка, и разобраться можно, ничего не перетыкивая. */
-    '<div class="pv-pane" id="pv-p-home">' +
+    /* ── ПУЛЬТ ──
+       Всё, что трогают по ходу игры, в одном месте: и профиль, и отдельные
+       ручки. Раньше профиль жил в «Сейчас», а ручки — в «Настройках», и
+       характер искали не там. */
+    '<div class="pv-pane" id="pv-p-pult">' +
       '<div id="pv-warn"></div>' +
-      '<div class="pv-ask">что делаем?</div>' +
-      '<div class="pv-menu">' +
-        '<button class="pv-mt" data-go="play"><i>📈</i><b>Сейчас</b>' +
-          '<span>что с игрушкой прямо сейчас и каким характером играть</span></button>' +
-        '<button class="pv-mt" data-go="rhythm"><i>▶</i><b>Поиграть</b>' +
-          '<span>готовые рисунки, своя программа и код для подруги</span></button>' +
-        '<button class="pv-mt" data-go="fet"><i>🔥</i><b>Предпочтения</b>' +
-          '<span>что заводит его и тебя — плагин ищет это в тексте</span></button>' +
-        '<button class="pv-mt" data-go="set"><i>🔌</i><b>Настройки</b>' +
-          '<span>игрушка, кто ведёт сцену, границы и лог</span></button>' +
+      '<div class="pv-sec">' +
+        '<div class="pv-lbl">Характер</div>' +
+        '<div class="pv-note">🎭 Общий тон одним касанием. Ниже — то же самое по отдельности, если хочется точнее.</div>' +
+        '<div class="pv-tabs" id="pv-profiles"></div>' +
+        '<div class="pv-hint" style="margin-top:6px" id="pv-prof-hint"></div>' +
       '</div>' +
-    '</div>' +
-
-    // ── ИГРА: то, что меняешь по ходу ──
-    '<div class="pv-pane" id="pv-p-play" hidden>' +
-      // Сводка сцены в одну полосу: заголовок с цифрами и короткий график.
-      // Раньше под ним стояли ещё три плитки — из-за них панель была вдвое выше.
+      '<div class="pv-sec">' +
+        '<div class="pv-lbl">Как играть сцену</div>' +
+        '<div class="pv-pick">мой потолок силы</div>' +
+        '<div class="pv-tabs" id="pv-capown"></div>' +
+        '<div class="pv-hint">выше этого плагин не поднимется, что бы ни придумала модель. Ниже общего потолка из настроек ' + ХОСТ.имя + ' — можно, выше — нет</div>' +
+        '<div class="pv-pick">сила сцены</div>' +
+        '<div class="pv-tabs" id="pv-gain"></div>' +
+        '<div class="pv-hint">насколько сильнее или мягче играть то, что придумала сцена. Твои волны и готовые рисунки это не трогает</div>' +
+        '<div class="pv-pick">отказ на пике</div>' +
+        '<div class="pv-tabs" id="pv-deny"></div>' +
+        '<div class="pv-hint">вместо максимума — тишина, потом возвращение вполсилы</div>' +
+        '<div class="pv-pick">длина отказа</div>' +
+        '<div class="pv-tabs" id="pv-denysec"></div>' +
+        '<div class="pv-hint">сколько держать тишину. Секунда дразнит, пять — сбивает настрой</div>' +
+        '<div class="pv-pick">своеволие</div>' +
+        '<div class="pv-tabs" id="pv-chaos"></div>' +
+        '<div class="pv-hint">иногда сильнее, чем просили, иногда внезапная заминка</div>' +
+        '<div class="pv-pick">переходы</div>' +
+        '<div class="pv-tabs" id="pv-smooth"></div>' +
+        '<div class="pv-hint">резко — уровень прыгает сразу, мягко — доезжает за секунду</div>' +
+        '<div class="pv-pick">в паузах</div>' +
+        '<div class="pv-tabs" id="pv-idle"></div>' +
+        '<div class="pv-hint">играть нечего — тишина, ровный фон или волна: она медленно ходит вверх-вниз, и её слышно даже в долгой паузе. Держится и между ответами</div>' +
+      '</div>' +
       '<div class="pv-sec">' +
         '<div class="pv-row" style="justify-content:space-between">' +
           '<span class="pv-lbl" style="margin:0">Последние 1,5 минуты</span>' +
@@ -3210,15 +3595,6 @@ function buildWin(){
           '<span>пик <b id="pv-t-peak">—</b></span>' +
         '</div>' +
       '</div>' +
-
-      // Характер — единственное, что меняют по ходу. Остальные ручки в «Настройках».
-      '<div class="pv-sec">' +
-        '<div class="pv-lbl">Характер</div>' +
-        '<div class="pv-note">🎭 Общий тон. Одно касание меняет силу, резкость и то, как часто дразнить.</div>' +
-        '<div class="pv-tabs" id="pv-profiles"></div>' +
-        '<div class="pv-hint" style="margin-top:6px" id="pv-prof-hint"></div>' +
-      '</div>' +
-
       '<div class="pv-sec">' +
         '<div class="pv-lbl">Что играло</div>' +
         '<div class="pv-note">🎵 Дорожка игры: паттерны, своя программа, волны и что плагин услышал в сцене.</div>' +
@@ -3226,13 +3602,15 @@ function buildWin(){
       '</div>' +
     '</div>' +
 
-    // ── РИТМ: всё, что играешь ты сама ──
+    /* ── ИГРАТЬ ──
+       Сетка рисунков свёрнута до двух рядов — последние, что играли. Своя
+       программа собирается в панельке поверх, а здесь видно, что в ней лежит. */
     '<div class="pv-pane" id="pv-p-rhythm" hidden>' +
-      // Два понятных раздела вместо трёх абзацев: готовые и свои.
       '<div class="pv-sec">' +
-        '<div class="pv-lbl">Готовые</div>' +
-        '<div class="pv-note">▶ Нажала — играет. Что почувствуешь, написано под кнопками.</div>' +
-        '<div class="pv-tabs" id="pv-presets"></div>' +
+        '<div class="pv-lbl">Готовые рисунки</div>' +
+        '<div class="pv-note">▶ Нажала — играет. Что почувствуешь, написано под сеткой.</div>' +
+        '<div id="pv-presets" class="pv-closed"></div>' +
+        '<button class="pv-b pv-ghost pv-morebtn" id="pv-pat-more"></button>' +
         '<div class="pv-hint" id="pv-pat-what" style="margin-top:7px"></div>' +
         '<div class="pv-row" style="justify-content:space-between;margin-top:10px">' +
           '<span class="pv-lbl" style="margin:0">Сколько играть</span>' +
@@ -3243,30 +3621,24 @@ function buildWin(){
 
       '<div class="pv-sec">' +
         '<div class="pv-lbl">Своя программа</div>' +
-        '<div class="pv-note">🎛 Собери из готовых кусков. Нажми кусок на дорожке — выберешь силу и время.</div>' +
-        '<div class="pv-tabs pv-pal" id="pv-pal"></div>' +
-        '<div id="pv-lanes"></div>' +
-        '<div class="pv-blkedit" id="pv-blkedit"></div>' +
+        '<div class="pv-note">🎛 Из тех же рисунков, у двух моторов — каждому свой: например, первому цунами, второму горки.</div>' +
+        '<div id="pv-progsum"></div>' +
         '<div class="pv-row" style="margin-top:8px">' +
-          '<button class="pv-b" id="pv-q-play" style="flex:1">Играть</button>' +
-          '<button class="pv-b pv-ghost" id="pv-q-save">Сохранить</button>' +
-          '<button class="pv-b pv-ghost" id="pv-q-clear">Очистить</button>' +
+          '<button class="pv-b" id="pv-q-play" style="flex:1">▶ Играть</button>' +
+          '<button class="pv-b pv-ghost" id="pv-q-open" style="flex:1">✎ Собрать</button>' +
         '</div>' +
         '<div id="pv-saved"></div>' +
-      '</div>' +
-
-      '<div class="pv-sec">' +
-        '<div class="pv-lbl">Поделиться</div>' +
-        '<div class="pv-note">🔗 Своя программа — коротким кодом. Подруга вставит и получит то же.</div>' +
-        '<input class="pv-in" id="pv-q-code" placeholder="PV2-w2x60.d3x30">' +
-        '<div class="pv-row" style="margin-top:7px">' +
-          '<button class="pv-b pv-ghost" id="pv-q-copy" style="flex:1">Копировать свой</button>' +
-          '<button class="pv-b pv-ghost" id="pv-q-apply" style="flex:1">Вставить чужой</button>' +
-        '</div>' +
+        '<details class="pv-more" id="pv-share"><summary>поделиться кодом</summary>' +
+          '<div class="pv-hint" style="margin:6px 0">Своя программа — коротким кодом. Подруга вставит и получит то же.</div>' +
+          '<input class="pv-in" id="pv-q-code" placeholder="PV2-w2x60.cu3x30">' +
+          '<div class="pv-row" style="margin-top:7px">' +
+            '<button class="pv-b pv-ghost" id="pv-q-copy" style="flex:1">Копировать свой</button>' +
+            '<button class="pv-b pv-ghost" id="pv-q-apply" style="flex:1">Вставить чужой</button>' +
+          '</div>' +
+        '</details>' +
       '</div>' +
     '</div>' +
 
-    // ── ФЕТИШИ ──
     '<div class="pv-pane" id="pv-p-fet" hidden>' +
       '<div class="pv-sec">' +
         '<div class="pv-lbl">🔥 Предпочтения</div>' +
@@ -3320,7 +3692,9 @@ function buildWin(){
         '<div id="pv-brainfields"></div>' +
       '<div class="pv-swrow" style="margin-top:10px"><div class="pv-sw"><span>Слушаться персонажа</span><div class="pv-tg" id="pv-tg-orders"><i></i></div></div><div class="pv-hint">сказал «сильнее» — станет сильнее, «замри» — тишина. А если в сцене он берёт игрушку и включает её на максимум — включится настоящая</div></div>' +
       '<div class="pv-swrow"><div class="pv-sw"><span>Не торопить сцену</span><div class="pv-tg" id="pv-tg-pace"><i></i></div></div><div class="pv-hint">просит модель вести близость ступенями и не сводить её к трём строчкам</div></div>' +
-      '<div class="pv-swrow"><div class="pv-sw"><span>Рассказать персонажу про игрушку</span><div class="pv-tg" id="pv-tg-toytell"><i></i></div></div><div class="pv-hint">какая она и какими словами её включать — тогда в сцене будет именно твоя игрушка, и персонаж сможет ею управлять</div></div>' +
+      '<div class="pv-pick">персонаж знает об игрушке</div>' +
+      '<div class="pv-tabs" id="pv-toymode"></div>' +
+      '<div class="pv-hint" id="pv-toymode-hint"></div>' +
       '<details class="pv-more" id="pv-peek"><summary>что уходит моделям</summary>' +
         '<div class="pv-hint" id="pv-peek-when"></div>' +
         '<div class="pv-pick">основной модели — перед каждым ответом</div><pre class="pv-pre" id="pv-peek-main"></pre>' +
@@ -3329,59 +3703,23 @@ function buildWin(){
       '</details>' +
       '</div>' +
 
-      // Характер целиком: кнопки профиля дублируют «Сейчас», ручки — только здесь.
       '<div class="pv-sec">' +
-        '<div class="pv-lbl">Характер игры</div>' +
-        '<div class="pv-note">🎚 Как играть то, что придумала модель. Профиль наверху ставит всё сразу, здесь — по одному.</div>' +
-
-        '<div class="pv-pick">мой потолок силы</div>' +
-        '<div class="pv-tabs" id="pv-capown"></div>' +
-        '<div class="pv-hint">выше этого плагин не поднимется, что бы ни придумала модель. Ниже общего потолка из настроек ' + ХОСТ.имя + ' — можно, выше — нет</div>' +
-
-        '<div class="pv-pick">громкость</div>' +
-        '<div class="pv-tabs" id="pv-gain"></div>' +
-        '<div class="pv-hint">насколько громче или тише играть то, что назначила модель</div>' +
-
-        '<div class="pv-pick">отказ на пике</div>' +
-        '<div class="pv-tabs" id="pv-deny"></div>' +
-        '<div class="pv-hint">вместо максимума — тишина, потом возвращение вполсилы</div>' +
-
-        '<div class="pv-pick">длина отказа</div>' +
-        '<div class="pv-tabs" id="pv-denysec"></div>' +
-        '<div class="pv-hint">сколько держать тишину. Секунда дразнит, пять — сбивает настрой</div>' +
-
-        '<div class="pv-pick">своеволие</div>' +
-        '<div class="pv-tabs" id="pv-chaos"></div>' +
-        '<div class="pv-hint">иногда сильнее, чем просили, иногда внезапная заминка</div>' +
+        '<div class="pv-lbl">Как вести себя</div>' +
+      '<div class="pv-swrow"><div class="pv-sw"><span>Отпустила волну — в ноль</span><div class="pv-tg" id="pv-tg-handzero"><i></i></div></div><div class="pv-hint">выключено — мотор держит силу, на которой ты его оставила</div></div>' +
+      '<div class="pv-swrow"><div class="pv-sw"><span>Отклик на мои сообщения</span><div class="pv-tg" id="pv-tg-reply"><i></i></div></div><div class="pv-hint">короткая вставка, пока модель думает</div></div>' +
+      '<div class="pv-swrow"><div class="pv-sw"><span>Повторять сцену до ответа</span><div class="pv-tg" id="pv-tg-loop"><i></i></div></div><div class="pv-hint">программа от модели играет по кругу, пока не придёт следующий ответ</div></div>' +
+      '<div class="pv-swrow"><div class="pv-sw"><span>Глушить, когда пишу я</span><div class="pv-tg" id="pv-tg-user"><i></i></div></div><div class="pv-hint">начала печатать — игрушка замолкает</div></div>' +
+      '<div class="pv-swrow"><div class="pv-sw"><span>Запомнить для этого чата</span><div class="pv-tg" id="pv-tg-perchat"><i></i></div></div><div class="pv-hint" id="pv-chat-note">с одним персонажем жёстче, с другим нежнее</div></div>' +
       '</div>' +
 
       '<div class="pv-sec">' +
-        '<div class="pv-lbl">Поведение</div>' +
-        '<div class="pv-note">⚙️ Мелочи, которые выставляют один раз и забывают.</div>' +
-      '<div class="pv-swrow"><div class="pv-sw"><span>Отпустила волну — в ноль</span><div class="pv-tg" id="pv-tg-handzero"><i></i></div></div><div class="pv-hint">выключено — мотор держит силу, на которой ты его оставила</div></div>' +
-      '<div class="pv-swrow"><div class="pv-sw"><span>Отклик на мои сообщения</span><div class="pv-tg" id="pv-tg-reply"><i></i></div></div><div class="pv-hint">короткая вставка, пока модель думает</div></div>' +
-      '<div class="pv-swrow"><div class="pv-sw"><span>Повторять до ответа</span><div class="pv-tg" id="pv-tg-loop"><i></i></div></div><div class="pv-hint">программа играет по кругу</div></div>' +
-      '<div class="pv-swrow"><div class="pv-sw"><span>Не гасить экран</span><div class="pv-tg" id="pv-tg-awake"><i></i></div></div><div class="pv-hint">иначе система усыпит ' + ХОСТ.имя + ' вместе с плагином</div></div>' +
-      '<div class="pv-swrow"><div class="pv-sw"><span>Работать, когда сворачиваю</span><div class="pv-tg" id="pv-tg-bg"><i></i></div></div><div class="pv-hint">игрушка держит уровень, пока тебя нет в ' + ХОСТ.имя + '; выключишь — замолкает сразу</div></div>' +
-      '<div class="pv-swrow"><div class="pv-sw"><span>Запомнить для этого чата</span><div class="pv-tg" id="pv-tg-perchat"><i></i></div></div><div class="pv-hint" id="pv-chat-note">с одним персонажем жёстче, с другим нежнее</div></div>' +
-        '<details class="pv-more"><summary>тонкая настройка</summary>' +
-          '<div class="pv-pick" style="margin-top:8px">переходы между уровнями</div>' +
-          '<div class="pv-tabs" id="pv-smooth"></div>' +
-          '<div class="pv-hint">резко — уровень прыгает сразу, мягко — плавно доезжает за секунду</div>' +
-          '<div class="pv-pick">между сценами</div>' +
-          '<div class="pv-tabs" id="pv-idle"></div>' +
-          '<div class="pv-hint">играть нечего — тишина, ровный фон или «волна»: она медленно ходит вверх-вниз, и её слышно даже в долгой паузе. Держится и между ответами</div>' +
-          '<div class="pv-swrow"><div class="pv-sw"><span>Дышать, пока модель думает</span><div class="pv-tg" id="pv-tg-breathe"><i></i></div></div><div class="pv-hint">пока идёт ответ, уровень плавно ходит вверх-вниз на четверть — чтобы ожидание не было ровным гулом</div></div>' +
-          '<div class="pv-sw"><span>Глушить, когда пишу я</span><div class="pv-tg" id="pv-tg-user"><i></i></div></div>' +
-          '<div class="pv-pick">размер шрифта в пульте</div>' +
-          '<div class="pv-tabs" id="pv-fsize"></div>' +
-          '<div class="pv-hint">для компьютера и Таверны: у всех свой масштаб системы и браузера, и окно у каждого выходит своего размера. Само окно тянется за уголок внизу справа</div>' +
-          '<div class="pv-row" style="margin-top:8px">' +
-            '<button class="pv-b pv-ghost" id="pv-dock-reset" style="flex:1">Вернуть кнопку ≋</button>' +
-            '<button class="pv-b pv-ghost" id="pv-win-reset" style="flex:1">Вернуть окно</button>' +
-          '</div>' +
-          '<div class="pv-hint">если утащила их за край и больше не достать</div>' +
-        '</details>' +
+        '<div class="pv-lbl">Экран и окно</div>' +
+      '<div class="pv-swrow"><div class="pv-sw"><span>Не давать экрану гаснуть во время игры</span><div class="pv-tg" id="pv-tg-awake"><i></i></div></div><div class="pv-hint">погаснет экран — система усыпит ' + ХОСТ.имя + ', и игрушка замрёт на полуслове</div></div>' +
+      '<div class="pv-swrow"><div class="pv-sw"><span>Не глушить игрушку, если ушла в другое приложение</span><div class="pv-tg" id="pv-tg-bg"><i></i></div></div><div class="pv-hint">ответила в Телеграме — игрушка держит уровень и доиграет, когда вернёшься. Выключишь — замолкает сразу</div></div>' +
+      '<div class="pv-swrow"><div class="pv-sw"><span>Незаметная кнопка ≋</span><div class="pv-tg" id="pv-tg-dockdim"><i></i></div></div><div class="pv-hint">пока игрушка молчит, кнопка почти прозрачная и не мешает читать</div></div>' +
+        '<div class="pv-pick">размер шрифта в пульте</div>' +
+        '<div class="pv-tabs" id="pv-fsize"></div>' +
+        '<div class="pv-hint">для компьютера и Таверны. Окно тянется за уголок внизу справа и двигается за шапку; двойной щелчок по шапке возвращает его на место. Кнопка ≋ и окно сами не уходят за край экрана</div>' +
       '</div>' +
 
       '<div class="pv-sec">' +
@@ -3393,8 +3731,32 @@ function buildWin(){
 
     '</div>' +
 
-    // Возврат в меню прижат к низу карточки и не уезжает при прокрутке раздела.
-    '<div id="pv-backbar" hidden><button class="pv-b pv-ghost" data-back="1" style="flex:1">↩ меню</button></div>' +
+    // Док: разделы переключаются одним касанием, без «вернуться в меню».
+    '<div class="pv-dockbar" id="pv-dockbar">' +
+      '<button data-dock="pult"><u>≋</u>Пульт</button>' +
+      '<button data-dock="rhythm"><u>▶</u>Играть</button>' +
+      '<button data-dock="fet"><u>🔥</u>Хочу</button>' +
+      '<button data-dock="set"><u>⚙</u>Настройки</button>' +
+    '</div>' +
+
+    /* Своя программа — панелька поверх разделов. Волны и СТОП над ней остаются
+       открытыми: пока собираешь, игрушку всегда можно остановить. */
+    '<div id="pv-sheet" hidden>' +
+      '<div class="pv-sheethead"><b>Своя программа</b><button class="pv-x" id="pv-sheet-x">✕</button></div>' +
+      '<div class="pv-sheetbody">' +
+        '<div id="pv-lanes"></div>' +
+        '<div class="pv-blkedit" id="pv-blkedit"></div>' +
+        '<div class="pv-pick" id="pv-addto">добавить рисунок</div>' +
+        '<div id="pv-pal"></div>' +
+      '</div>' +
+      '<div class="pv-row pv-sheetfoot">' +
+        '<button class="pv-b" id="pv-sheet-play" style="flex:1">▶ Играть</button>' +
+        '<button class="pv-b pv-ghost" id="pv-q-save">Сохранить</button>' +
+        '<button class="pv-b pv-ghost" id="pv-q-clear">Очистить</button>' +
+        '<button class="pv-b pv-ghost" id="pv-sheet-ok">Готово</button>' +
+      '</div>' +
+    '</div>' +
+
 
     '</div>' +
     '<div class="pv-foot">Пуся · t.me/pusgir</div>' +
@@ -3405,9 +3767,9 @@ function buildWin(){
   // Слой окна кликов не ловит (pointer-events:none) — чат под панелью остаётся
   // живым, закрывает только ✕.
   el('pv-close').addEventListener('click', closeWin);
-  var dr = el('pv-dock-reset'); if (dr) dr.addEventListener('click', resetDock);
-  var wr = el('pv-win-reset'); if (wr) wr.addEventListener('click', function(){ resetWin(); toast('окно вернулось на место'); });
-  el('pv-panic').addEventListener('click', function(){ panic('кнопка'); });
+  // СТОП срабатывает уже на нажатии, а не на полном клике: на ПК первый клик по
+  // окну Таво после другого приложения уходит на фокус, и стоп мог не засчитаться.
+  стопНа(el('pv-panic'), 'кнопка');
   var ag = el('pv-again'); if (ag) ag.addEventListener('click', repeatProg);
   var pl = el('pv-plus');  if (pl) pl.addEventListener('click', function(){ bumpHand(1); });
   var mn = el('pv-minus'); if (mn) mn.addEventListener('click', function(){ bumpHand(-1); });
@@ -3459,6 +3821,7 @@ function buildWin(){
     buildPrompt(); return true;
   });
   tg('pv-tg-loop', function(){ return !!C.loop; }, function(v){ C.loop = v; saveCfg(); return true; });
+  tg('pv-tg-dockdim', function(){ return !!C.dockDim; }, function(v){ C.dockDim = v; saveCfg(); paintMeter(); return true; });
   tg('pv-tg-user', function(){ return !!C.autoStopOnUser; }, function(v){ C.autoStopOnUser = v; saveCfg(); return true; });
   tg('pv-tg-awake', function(){ return !!C.keepAwake; }, function(v){
     C.keepAwake = v; saveCfg();
@@ -3480,7 +3843,6 @@ function buildWin(){
   tg('pv-tg-orders', function(){ return !!C.orders; }, function(v){ C.orders = v; saveCfg(); return true; });
   tg('pv-tg-pace', function(){ return !!C.paceHint; }, function(v){ C.paceHint = v; saveCfg(); buildPrompt(); return true; });
   var pk = el('pv-peek'); if (pk) pk.addEventListener('toggle', paintPeek);
-  tg('pv-tg-toytell', function(){ return !!C.toyTell; }, function(v){ C.toyTell = v; toyToldAt = 0; saveCfg(); buildPrompt(); return true; });
   tg('pv-tg-perchat', function(){ return !!C.perChat; }, function(v){
     C.perChat = v; saveCfg();
     if (v){ saveChatCfg(); log('chat', 'настройки закреплены за этим чатом'); }
@@ -3494,13 +3856,23 @@ function buildWin(){
   el('pv-fet-card').addEventListener('click', rescanCard);
   el('pv-fet-chat').addEventListener('click', scanChatFetishes);
 
+  // Палитра своей программы — те же рисунки, что в «Готовых», плюс тишина.
   var pal = el('pv-pal');
-  КУСКИ.forEach(function(name){
-    var b = pdoc.createElement('div'); b.className = 'pv-tab pv-add'; b.textContent = '+ ' + name;
+  ['тишина'].concat(Object.keys(PRESETS)).forEach(function(name){
+    var b = pdoc.createElement('div'); b.className = 'pv-pat';
+    b.innerHTML = (name === 'тишина' ? '<svg viewBox="0 0 60 22" preserveAspectRatio="none"><path d="M0 20 L60 20"/></svg>' : patIcon(name)) +
+      '<span>' + esc(name) + '</span>';
     b.addEventListener('click', function(){ addBlock(name); });
     pal.appendChild(b);
   });
   el('pv-q-play').addEventListener('click', playLanes);
+  el('pv-q-open').addEventListener('click', openSheet);
+  el('pv-sheet-play').addEventListener('click', playLanes);
+  el('pv-sheet-x').addEventListener('click', closeSheet);
+  el('pv-sheet-ok').addEventListener('click', closeSheet);
+  [].forEach.call(el('pv-dockbar').children, function(b){
+    b.addEventListener('click', function(){ showTab(b.getAttribute('data-dock')); });
+  });
   el('pv-q-save').addEventListener('click', saveLanes);
   el('pv-q-clear').addEventListener('click', function(){ C.lanes = [[], []]; laneSel = null; saveCfg(); paintLanes(); });
 
@@ -3534,11 +3906,15 @@ function buildWin(){
   paintPicks();
 
   var pr = el('pv-presets');
-  Object.keys(PRESETS).forEach(function(name){
-    var b = pdoc.createElement('div'); b.className = 'pv-tab'; b.textContent = name;
-    b.setAttribute('data-pat', name);
-    b.addEventListener('click', function(){
-      C.patLast = name; saveCfg(); paintPat();       // подпись объяснит, что это такое
+  pr.addEventListener('click', function(e){
+    var b = e.target.closest ? e.target.closest('[data-pat]') : null; if (!b) return;
+    var name = b.getAttribute('data-pat');
+    (function(){
+      C.patLast = name;
+      // последние сыгранные встают первыми — но только при следующем открытии,
+      // иначе плитка уехала бы из-под пальца
+      C.patRecent = [name].concat((C.patRecent || []).filter(function(x){ return x !== name; })).slice(0, 6);
+      saveCfg(); paintPat();       // подпись объяснит, что это такое
       if (!D || D.state !== 'on'){ toast('сначала подключись'); return; }
       E.manual = 0; E.hand = [0, 0];
       // Паттерн выбран рукой — играем ровно его: без своеволия, без отказов
@@ -3546,9 +3922,10 @@ function buildWin(){
       var сек = clamp(C.patSec, 30, 300);
       playProgram(makePreset(name, capLevel(), сек), 0, { exact: true, mine: true, loop: !!C.patLoop });
       log('pat', 'паттерн «' + name + '» · ' + секстр(сек) + (C.patLoop ? ' по кругу' : ' один раз'));
-    });
-    pr.appendChild(b);
+    })();
   });
+  el('pv-pat-more').addEventListener('click', function(){ C.patOpen = !C.patOpen; saveCfg(); paintPresets(); });
+  paintPresets();
 
   var ps = el('pv-patsec');
   ps.value = clamp(C.patSec, 30, 300);
@@ -3556,7 +3933,7 @@ function buildWin(){
   tg('pv-tg-patloop', function(){ return !!C.patLoop; }, function(v){ C.patLoop = v; saveCfg(); paintPat(); return true; });
   paintPat();
 
-  showTab(C.tab || 'home');
+  showTab(C.tab || 'pult');
   paintTabs(); paintBrains(); paintProfiles(); paintStatus(); paintMeter(); paintLog();
 }
 
@@ -3657,6 +4034,7 @@ function pickChat(){
     // на «общий», и найденное ложилось не в тот чат.
     paintFetish();
     scanCharCard();
+    игрушкаВЧате = false; checkToyInCard(); checkToyInChat();
   }).catch(function(){});
 }
 
@@ -3685,20 +4063,22 @@ function paintProfiles(){
   if (h) h.textContent = profHint();
 }
 
-var PANES = ['home', 'play', 'rhythm', 'fet', 'set'];
-var СТАРЫЕ_ВКЛАДКИ = { brain: 'set', more: 'set' };     // раскладка менялась — не роняем C.tab
+var PANES = ['pult', 'rhythm', 'fet', 'set'];
+// раскладка менялась — сохранённый раздел прежних версий ведём туда, где он теперь
+var СТАРЫЕ_ВКЛАДКИ = { brain: 'set', more: 'set', home: 'pult', play: 'pult' };
 
 function showTab(id){
   if (СТАРЫЕ_ВКЛАДКИ[id]) id = СТАРЫЕ_ВКЛАДКИ[id];
-  if (PANES.indexOf(id) < 0) id = 'home';
+  if (PANES.indexOf(id) < 0) id = 'pult';
   C.tab = id; saveCfg();
   PANES.forEach(function(x){ var n = el('pv-p-' + x); if (n) n.hidden = (x !== id); });
-  var bb = el('pv-backbar'); if (bb) bb.hidden = (id === 'home');   // в меню возвращаться некуда
+  var док = el('pv-dockbar');
+  if (док) [].forEach.call(док.children, function(b){ b.className = b.getAttribute('data-dock') === id ? 'on' : ''; });
+  if (id !== 'rhythm') closeSheet();                 // панелька программы живёт только в «Играть»
   var body = el('pv-body'); if (body) body.scrollTop = 0;
-  if (id === 'home') paintWarn();
+  if (id === 'pult'){ paintWarn(); paintGraph(); }
   if (id === 'fet') paintFetish();
-  if (id === 'rhythm'){ paintLanes(); paintPat(); }
-  if (id === 'play') paintGraph();
+  if (id === 'rhythm'){ paintPresets(); paintLanes(); paintPat(); }
 }
 
 /* Плашка в меню. Половина вопросов «почему ничего не происходит» — это либо
@@ -3734,58 +4114,42 @@ function paintWarn(){
    экраны мастера со скриншотами. */
 
 var TOUR = [
-  { тут: 'pv-tg-ai', где: 'home',
+  { тут: 'pv-tg-ai', где: 'pult',
     t: 'Главный тумблер',
     s: 'Включён — игрушку ведёт персонаж: плагин читает сцену и крутит её сам. Выключен — она слушается только тебя.' },
 
-  { тут: 'pv-panic', где: 'home',
-    t: 'СТОП',
-    s: 'Гасит всё мгновенно и с любого экрана. Рядом волны: тянешь вверх — сильнее. У двух моторов цепочка решает, двигаются они вместе или каждый сам.' },
+  { тут: 'pv-panic', где: 'pult',
+    t: 'СТОП и сила',
+    s: 'СТОП гасит всё мгновенно и с любого экрана. Рядом волны: тянешь вверх — сильнее, «+» и «−» — ровно на деление, ↻ — повторить последнюю сцену.' },
 
-  { сам: function(){ return el('pv-p-home') && el('pv-p-home').querySelector('.pv-menu'); }, где: 'home',
-    t: 'Отсюда попадаешь всюду',
-    s: 'Четыре раздела, и у каждого написано, что внутри. Из любого возвращаешься кнопкой «↩ меню» внизу.' },
+  { тут: 'pv-dockbar', где: 'pult',
+    t: 'Разделы',
+    s: 'Пульт, рисунки, предпочтения и настройки — одним касанием, без возврата в меню. Пульт наверху остаётся на месте всегда.' },
 
-  { тут: 'pv-warn', где: 'home', пропустить: function(){ return !el('pv-warn') || !el('pv-warn').innerHTML; },
+  { тут: 'pv-warn', где: 'pult', пропустить: function(){ return !el('pv-warn') || !el('pv-warn').innerHTML; },
     t: 'Если что-то мешает',
     s: 'Здесь появится причина, по которой игрушка молчит, — и по плашке можно нажать, чтобы попасть туда, где чинится.' },
 
-  // ── Сейчас ──
-  { тут: 'pv-graph', где: 'play',
-    t: 'Как идёт сцена',
-    s: 'Последние полторы минуты одним взглядом: где было тихо, где пик. Шкала везде одна — от 0 до 20.' },
-
-  { внутри: 'pv-profiles', где: 'play',
+  { внутри: 'pv-profiles', где: 'pult',
     t: 'Характер',
-    s: 'Общий тон игры одним касанием. Под кнопками словами написано, как играет выбранный.' },
+    s: 'Общий тон игры одним касанием. Ниже — то же самое по отдельности: потолок, сила сцены, отказ на пике, что делать в паузах.' },
 
-  { внутри: 'pv-play', где: 'play',
-    t: 'Что играло',
-    s: 'Дорожка игры: какие паттерны и программы играли, что плагин услышал в сцене. Свежее сверху.' },
+  { внутри: 'pv-graph', где: 'pult',
+    t: 'Как идёт сцена',
+    s: 'Последние полторы минуты одним взглядом, а ниже — что играло и что плагин услышал в сцене.' },
 
-  // ── Поиграть ──
   { внутри: 'pv-presets', где: 'rhythm',
-    t: 'Готовые',
-    s: 'Нажала рисунок — играет он, персонаж не вмешивается. Ниже — сколько играть и по кругу ли.' },
+    t: 'Готовые рисунки',
+    s: 'Нажала — играет он, персонаж не вмешивается. Видно два ряда — последние, что играли; остальные по кнопке под сеткой.' },
 
-  { внутри: 'pv-lanes', где: 'rhythm',
-    t: 'Свои',
-    s: 'Собираешь из готовых кусков: нажала «+ волна» — кусок встал на дорожку, нажала на кусок — выбрала силу и время. У двух моторов у каждого своя дорожка.' },
+  { внутри: 'pv-progsum', где: 'rhythm',
+    t: 'Своя программа',
+    s: 'Здесь видно, что в ней лежит. «Собрать» открывает панельку: у двух моторов каждому свой рисунок — например, первому цунами, второму горки.' },
 
-  { внутри: 'pv-q-code', где: 'rhythm',
-    t: 'Поделиться',
-    s: 'Своя программа превращается в короткий код. Скопировала, отправила — подруга вставит и получит то же самое.' },
-
-  // ── Предпочтения ──
   { внутри: 'pv-fet-her', где: 'fet',
     t: 'Что заводит',
     s: 'Сверху — персонажа: из карточки или из чата. Ниже — твои, через запятую. Лишнее убирается крестиком.' },
 
-  { внутри: 'pv-tg-fetdrive', где: 'fet',
-    t: 'Что с ними делать',
-    s: 'Можно тихо подсказывать модели вплетать их в текст. И можно, чтобы игрушка поддавала, когда такое мелькнуло в сцене.' },
-
-  // ── Настройки ──
   { внутри: 'pv-connect', где: 'set',
     t: 'Игрушка',
     s: 'Подключить, проверить, выбрать, какие участвуют. Здесь же пройти настройку и эту экскурсию заново.' },
@@ -3794,21 +4158,13 @@ var TOUR = [
     t: 'Кто ведёт сцену',
     s: 'Плагин сам по словам в тексте или отдельная модель. Ниже — слушаться ли команд персонажа и просить ли модель не комкать сцену.' },
 
-  { внутри: 'pv-gain', где: 'set',
-    t: 'Характер игры',
-    s: 'То же, что профиль, но по отдельности: громкость, отказ на пике, своеволие. Профиль переставляет их все сразу.' },
-
-  { внутри: 'pv-tg-reply', где: 'set',
-    t: 'Поведение',
-    s: 'Мелочи на один раз: откликаться на твои сообщения, не гасить экран, помнить настройки для чата. Потолок, автостоп и стоп-слово — ' + ХОСТ.настройки + '.' },
-
   { внутри: 'pv-log', где: 'set',
     t: 'Что происходило',
-    s: 'Связь, ошибки, заряд — ошибки подсвечены красным. Игра здесь одной строкой, подробно она в «Сейчас».' }
+    s: 'Связь, ошибки, заряд — ошибки подсвечены красным. Потолок, автостоп и стоп-слово — ' + ХОСТ.настройки + '.' }
 ];
 
 // Раздел, чтобы в облачке было понятно, где мы сейчас.
-var TOUR_РАЗДЕЛ = { home: 'Меню', play: 'Сейчас', rhythm: 'Поиграть', fet: 'Предпочтения', set: 'Настройки' };
+var TOUR_РАЗДЕЛ = { pult: 'Пульт', rhythm: 'Играть', fet: 'Предпочтения', set: 'Настройки' };
 
 var tourStep = 0;
 
@@ -4251,7 +4607,7 @@ function wizFinish(дошла){
   var ob = el('pv-onboard'), main = el('pv-main');
   if (ob) ob.hidden = true;
   if (main) main.hidden = false;
-  showTab(дошла ? 'home' : (C.tab || 'home'));
+  showTab(дошла ? 'pult' : (C.tab || 'pult'));
   if (дошла) log('wiz', 'настройка пройдена');
 }
 
@@ -4497,8 +4853,91 @@ function paintPat(){
   var box = el('pv-presets');
   if (box) [].forEach.call(box.children, function(c){
     var есть = c.getAttribute('data-pat') === C.patLast;
-    c.className = 'pv-tab' + (есть ? ' on' : '');
+    c.className = 'pv-pat' + (есть ? ' on' : '');
   });
+}
+
+/* Подпись под выбором «персонаж знает об игрушке» — с тем, что сейчас на деле. */
+function paintToyMode(){
+  var h = el('pv-toymode-hint'); if (!h) return;
+  var режим = C.toyMode == null ? 1 : +C.toyMode;
+  h.textContent = режим === 0
+    ? 'не знает совсем: игрушкой управляешь ты или плагин по тексту сцены, а персонаж ни разу её не достанет'
+    : режим === 2
+    ? 'знает с первого ответа, какая она и какими словами её включать, и может сам принести её в сцену'
+    : 'узнаёт, только когда игрушка уже есть — в переписке или в карточке персонажа. Сам в сцену её не принесёт. ' +
+      (toyInScene() ? 'Сейчас она в сцене — рассказываю.' : 'Сейчас её в сцене нет — молчу.');
+}
+
+/* Готовые рисунки. Первыми — последние сыгранные, дальше всё по порядку.
+   Свёрнуто — видно два ряда, остальное по кнопке: сетка на тридцать с лишним
+   плиток иначе превращается в бесконечную простыню. */
+function paintPresets(){
+  var box = el('pv-presets'); if (!box) return;
+  var все = Object.keys(PRESETS);
+  var свежие = (C.patRecent || []).filter(function(x){ return PRESETS[x]; });
+  var порядок = свежие.concat(все.filter(function(x){ return свежие.indexOf(x) < 0; }));
+  box.innerHTML = порядок.map(function(name){
+    return '<div class="pv-pat' + (name === C.patLast ? ' on' : '') + '" data-pat="' + esc(name) + '">' +
+      patIcon(name) + '<span>' + esc(name) + '</span></div>';
+  }).join('');
+  box.className = C.patOpen ? '' : 'pv-closed';
+  var b = el('pv-pat-more');
+  if (b) b.textContent = C.patOpen ? 'свернуть ▴' : 'все рисунки · ' + все.length + ' ▾';
+}
+
+/* Панелька своей программы. Встаёт под волны, а не поверх них: пока собираешь,
+   СТОП и сила остаются под рукой. */
+function openSheet(){
+  var sh = el('pv-sheet'); if (!sh) return;
+  var main = el('pv-main'), пульт = main && main.querySelector('.pv-sec');
+  var верх = пульт ? пульт.offsetTop + пульт.offsetHeight + 6 : 0;
+  sh.style.top = верх + 'px';
+  sh.hidden = false;
+  paintLanes();
+}
+function closeSheet(){
+  var sh = el('pv-sheet'); if (!sh || sh.hidden) return;
+  sh.hidden = true; laneSel = null;
+  paintLanes();
+}
+
+// Что лежит в своей программе — одной строкой на мотор, без открытия редактора.
+function paintProgSum(){
+  var box = el('pv-progsum'); if (!box) return;
+  var L = lanes(), двое = lanesTwo();
+  var строка = function(lane){
+    if (!lane.length) return '<i>пусто</i>';
+    return lane.map(function(b){ return esc(blockTitle(b)) + ' <i>' + esc(blockSub(b)) + '</i>'; }).join(' → ');
+  };
+  box.innerHTML = (двое ? [0, 1] : [0]).map(function(li){
+    return '<div class="pv-psum"><span>' + (двое ? 'мотор ' + (li + 1) : 'программа') + '</span><b>' + строка(L[li]) + '</b></div>';
+  }).join('');
+}
+
+/* Силуэт рисунка: прогоняем один круг через те же шаги, что пойдут в игрушку,
+   и рисуем линию уровня во времени. Потолок берём условный — форме он не важен. */
+function patIcon(name){
+  // Один круг — это часто один горбик, и «рябь» не отличить от «прилива».
+  // Поэтому повторяем круг, пока картинка не покроет секунд семь: так видно
+  // и форму, и частоту. Одиночный шаг (ровно, крещендо) не повторяем — иначе
+  // долгий подъём превратился бы в пилу, которой нет.
+  var круг = PRESETS[name] ? PRESETS[name](20, 3) : [];
+  if (!круг.length) return '';
+  var длина = круг.reduce(function(x, y){ return x + y.ms; }, 0) || 1;
+  var раз = круг.length < 2 ? 1 : clamp(Math.round(7000 / длина), 2, 6);
+  var шаги = [];
+  for (var k = 0; k < раз; k++) шаги = шаги.concat(круг);
+  var всего = шаги.reduce(function(x, y){ return x + y.ms; }, 0) || 1;
+  var W = 60, H = 22, t = 0, точки = [];
+  шаги.forEach(function(ш){
+    var a = ш.v || 0, b = (ш.to && ш.to.v != null) ? ш.to.v : a;
+    var x0 = t / всего * W, x1 = (t + ш.ms) / всего * W;
+    точки.push([x0, H - 2 - a / 20 * (H - 4)], [x1, H - 2 - b / 20 * (H - 4)]);
+    t += ш.ms;
+  });
+  var путь = точки.map(function(p, i){ return (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1); }).join(' ');
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none"><path d="' + путь + '"/></svg>';
 }
 
 /* ═══ волны: ручное управление ═══ */
@@ -4671,10 +5110,11 @@ function drawWaves(){
    варианты сразу и словами — так сделано в дневнике, и там это работает. */
 
 var ВЫБОРЫ = {
-  gain:   [{ v: 0.7, t: 'тише' }, { v: 1, t: 'как просят' }, { v: 1.5, t: 'громче' }, { v: 2.2, t: 'вдвое' }],
+  gain:   [{ v: 0.7, t: 'мягче' }, { v: 1, t: 'как задумано' }, { v: 1.5, t: 'сильнее' }, { v: 2.2, t: 'вдвое' }],
   deny:   [{ v: 0, t: 'никогда' }, { v: 8, t: 'редко' }, { v: 25, t: 'иногда' }, { v: 55, t: 'часто' }],
   denysec:[{ v: 1, t: 'секунда' }, { v: 2, t: 'две' }, { v: 3, t: 'три' }, { v: 5, t: 'пять' }],
   capown: [{ v: 0, t: 'как в настройках' }, { v: 8, t: 'до 8' }, { v: 12, t: 'до 12' }, { v: 16, t: 'до 16' }],
+  toymode:[{ v: 0, t: 'нет' }, { v: 1, t: 'если в сцене' }, { v: 2, t: 'всегда' }],
   fsize:  [{ v: 0.9, t: 'мельче' }, { v: 1, t: 'обычный' }, { v: 1.15, t: 'крупнее' }, { v: 1.3, t: 'ещё крупнее' }],
   chaos:  [{ v: 0, t: 'ровно' }, { v: 15, t: 'чуть' }, { v: 40, t: 'заметно' }, { v: 75, t: 'своенравно' }],
   smooth: [{ v: 0, t: 'резко' }, { v: 35, t: 'мягко' }, { v: 70, t: 'очень мягко' }],
@@ -4715,7 +5155,7 @@ function tg(id, get, set){
 function repaintToggles(){
   ['pv-tg-ai','pv-tg-loop','pv-tg-user','pv-tg-awake','pv-tg-bg','pv-tg-gate','pv-tg-auto',
    'pv-tg-reply','pv-tg-breathe','pv-tg-perchat','pv-tg-fetremind','pv-tg-fetdrive','pv-tg-flow',
-   'pv-tg-orders','pv-tg-pace','pv-tg-patloop','pv-tg-toytell','pv-tg-hint','pv-tg-handzero']
+   'pv-tg-orders','pv-tg-pace','pv-tg-patloop','pv-tg-hint','pv-tg-handzero','pv-tg-dockdim']
     .forEach(function(id){ var n = el(id); if (n && n._paint) n._paint(); });
 }
 
@@ -4750,6 +5190,9 @@ function paintPicks(){
     function(v){ C.capOwn = v; saveCfg(); saveChatCfg(); paintStatus(); });
   chipRow('pv-denysec','denysec',function(){ return C.denySec; },
     function(v){ C.denySec = v; saveCfg(); saveChatCfg(); });
+  chipRow('pv-toymode','toymode',function(){ return C.toyMode == null ? 1 : +C.toyMode; },
+    function(v){ C.toyMode = v; toyToldAt = 0; saveCfg(); buildPrompt(); paintToyMode(); });
+  paintToyMode();
   chipRow('pv-fsize',  'fsize',  function(){ return fontScale(); },
     function(v){ lsSet('pv_winzoom', v); sizeWin(); placeWin(); });
 }
@@ -4905,7 +5348,7 @@ function paintStatus(){
   // Подключились хотя бы раз — экран первого входа больше не показываем никогда.
   if (D && D.state === 'on' && !C.everConnected){ C.everConnected = true; saveCfg(); }
   paintGate();
-  if (C.tab === 'home') paintWarn();        // плашка в меню должна поспевать за связью
+  if (C.tab === 'pult') paintWarn();        // плашка должна поспевать за связью
 
   if (dot) dot.className = 'pv-dot ' + (D ? (D.state === 'on' ? 'on' : D.state === 'error' ? 'err' : D.state === 'connecting' ? 'wait' : '') : '');
 
@@ -4956,7 +5399,7 @@ function pushHist(v){
   histAt = t;
   HIST.push(Math.round(v));
   if (HIST.length > 90) HIST.shift();            // полторы минуты истории
-  if (C.tab === 'play') paintGraph();
+  if (C.tab === 'pult') paintGraph();
 }
 
 function paintGraph(){
@@ -5012,7 +5455,11 @@ function paintMeter(){
   // Вслепую цифра ничего не показывает (волны тоже), иначе смысла в режиме нет.
   if (n) n.textContent = C.blind ? '·' : v;
   var dk = el('pv-dock');
-  if (dk){ var live = v > 0; if (live !== (dk.className === 'pv-live')) dk.className = live ? 'pv-live' : ''; }
+  if (dk){
+    var live = v > 0;
+    var cls = (live ? 'pv-live' : '') + (!live && C.dockDim ? ' pv-dim' : '');
+    if (dk.className !== cls) dk.className = cls;
+  }
   placeStop2();
 }
 
@@ -5040,7 +5487,7 @@ function openWin(){
   var w = el('pv-win');
   if (w){
     w.classList.add('on');
-    showTab(C.tab || 'home');
+    showTab(C.tab || 'pult');
     paintTabs(); paintBrains(); paintProfiles(); paintFetish(); paintLanes(); paintPat(); paintGraph();
     paintStatus(); paintMeter(); paintLog(); paintGate();
     paintStrips(true);
@@ -5074,10 +5521,14 @@ function placeWin(){
   if (!pos) return;
   var r = card.getBoundingClientRect();
   if (!r.width) return;
-  var W = pwin.innerWidth || 800, H = pwin.innerHeight || 600;
+  var W = pwin.innerWidth || 800, H = pwin.innerHeight || 600, верх = 0;
+  // В Таво сверху шапка чата, снизу строка ввода — окно двигаем только между ними,
+  // иначе шапка пульта уезжает под шапку Таво и перестаёт нажиматься.
+  var wr = el('pv-win') && el('pv-win').getBoundingClientRect();
+  if (wr && wr.height > 200){ верх = wr.top; H = wr.bottom; }
   // окно целиком остаётся на экране: подвинули его и сменили размер окна браузера — не теряем
   var x = clamp(pos.x, -r.left + 4, W - r.right - 4);
-  var y = clamp(pos.y, -r.top + 4, H - r.bottom - 4);
+  var y = clamp(pos.y, верх - r.top, H - r.bottom);
   // При увеличенном шрифте карточка считает свои пиксели крупнее — сдвиг делим,
   // иначе окно уезжает из-под курсора быстрее, чем его тянут.
   var z = fontScale();
@@ -5101,10 +5552,12 @@ function sizeWin(){
   var z = fontScale();
   var s = lsGet('pv_winsize', null) || РАЗМЕР;
   var W = pwin.innerWidth || 900, H = pwin.innerHeight || 700;
+  // Высота — то, что осталось между шапкой и строкой ввода, а не весь экран
+  if (win && win.clientHeight > 200) H = win.clientHeight + 16;
   // Упереться можно только в край экрана — раньше потолок был куда ниже, и окно
   // не растягивалось на пустое место рядом с чатом.
   var w = clamp(+s.w || РАЗМЕР.w, 320, Math.max(320, W - 16));
-  var h = clamp(+s.h || РАЗМЕР.h, 360, Math.max(360, H - 16));
+  var h = clamp(+s.h || РАЗМЕР.h, 540, Math.max(540, H - 16));
   card.classList.add('pv-fixed');
   if (win) win.classList.add('pv-sized');
   // Размер задаём в единицах самой карточки: при увеличенном шрифте она их
@@ -5193,6 +5646,8 @@ function wireGrip(){
 try { pdoc.addEventListener('visibilitychange', function(){ if (!pdoc.hidden) startWaves(); }); } catch(e){}
 PV.open = openWin;
 PV.readNow = function(){ clearTimeout(msgTimer); return readLast(); };
+// для проверки: что лежит в чате на самом деле (без плашек, которые рисует Таво)
+PV._msgs = function(){ var T = TV(); return T && T.message && T.message.find ? Promise.resolve(T.message.find()) : Promise.resolve(null); };
 // Для SillyTavern: рубильник и кнопка ≋ настраиваются снаружи панели.
 PV.repaint = function(){ try { buildPrompt(); paintStatus(); } catch(e){} };
 PV.resetDock = function(){ try { resetDock(); } catch(e){} };
