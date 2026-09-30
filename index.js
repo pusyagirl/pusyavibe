@@ -104,6 +104,12 @@ function applyInsets() {
 }
 
 const переходник = {
+    // Язык самой Таверны — пульт в режиме «авто» идёт за ним, как в Таво.
+    plugin: {
+        i18n: {
+            get locale() { try { return String(localStorage.getItem('language') || ''); } catch { return ''; } },
+        },
+    },
     message: {
         // Пульту нужен хвост чата: последнее сообщение и немного истории для «из чата».
         // Весь чат на каждый токен потока — лишняя работа на длинных переписках.
@@ -229,7 +235,6 @@ const DRAWER = `
         <button class="pvx-b pvx-ghost" id="pvx_win">Вернуть окно пульта на место</button>
       </div>
       <div class="pvx-hint">окно пульта можно таскать за шапку; двойной щелчок по шапке — тоже вернуть на место</div>
-      <div class="pvx-hint pvx-foot">Пуся · <a href="https://t.me/pusgir" target="_blank">t.me/pusgir</a></div>
     </div>
   </div>
 </div>`;
@@ -266,7 +271,6 @@ const DRAWER_EN = `
         <button class="pvx-b pvx-ghost" id="pvx_win">Put the panel window back</button>
       </div>
       <div class="pvx-hint">drag the panel window by its header; double-click the header to put it back as well</div>
-      <div class="pvx-hint pvx-foot">Pusya · <a href="https://t.me/pusgir" target="_blank">t.me/pusgir</a></div>
     </div>
   </div>
 </div>`;

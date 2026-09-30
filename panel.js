@@ -213,7 +213,7 @@ function loadCfgFromTavo(){
    поэтому уходит только «vibe, anon, версия» — ни ника, ни настроек, ни
    предпочтений, ни названия игрушки. На стенде без Таво не стучимся, чтобы
    проверки не считались живыми людьми. */
-var PV_VERSION = '1.17.2';
+var PV_VERSION = '1.17.3';
 (function(){
   function beat(){
     if (!TV()) return;
@@ -4030,7 +4030,6 @@ function buildWin(){
 
 
     '</div>' +
-    '<div class="pv-foot">Пуся · t.me/pusgir</div>' +
     '<div id="pv-grip" hidden title="потянуть — изменить размер, двойной щелчок — вернуть"></div>' +
   '</div>';
   (pdoc.body || pdoc.documentElement).appendChild(w);
