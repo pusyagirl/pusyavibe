@@ -30,7 +30,19 @@ const ctx = () => SillyTavern.getContext();
 
 /* ── настройки плагина (в Таво — экран настроек плагина) ── */
 
-const HOST_DEFAULTS = { aiControl: false, capLevel: 14, maxMinutes: 20, safeword: 'стоп' };
+/* Язык — как у пульта: выбранный в нём, иначе язык Таверны или браузера. */
+function lang() {
+    try {
+        const c = JSON.parse(localStorage.getItem('pv_cfg_v1') || '{}');
+        if (c.lang === 'ru' || c.lang === 'en') return c.lang;
+    } catch { /* нет сохранённых настроек — смотрим дальше */ }
+    let l = '';
+    try { l = String(localStorage.getItem('language') || navigator.language || ''); } catch { /* нет хранилища — считаем по-английски */ }
+    return /^(ru|uk|be|kk)/i.test(l) ? 'ru' : 'en';
+}
+const EN = lang() === 'en';
+
+const HOST_DEFAULTS = { aiControl: false, capLevel: 14, maxMinutes: 20, safeword: EN ? 'stop' : 'стоп' };
 
 function S() {
     if (!extension_settings[MODULE]) extension_settings[MODULE] = {};
@@ -136,7 +148,7 @@ const переходник = {
     // Вторая модель без своего ключа — тихий запрос через текущее подключение Таверны.
     generate: async (prompt) => {
         const gen = ctx().generateQuietPrompt;
-        if (typeof gen !== 'function') throw new Error('Таверна не дала тихий запрос — впиши свой ключ');
+        if (typeof gen !== 'function') throw new Error(EN ? 'SillyTavern gave no quiet request — enter your own key' : 'Таверна не дала тихий запрос — впиши свой ключ');
         try {
             const r = await gen({ quietPrompt: prompt, skipWIAN: true });
             if (r) return String(r);
@@ -222,9 +234,46 @@ const DRAWER = `
   </div>
 </div>`;
 
+const DRAWER_EN = `
+<div class="inline-drawer" id="pv_root">
+  <div class="inline-drawer-toggle inline-drawer-header">
+    <b>📳 PUSYA VIBE</b>
+    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+  </div>
+  <div class="inline-drawer-content">
+    <div class="pvx">
+      <div class="pvx-note">The panel opens with the <b>≋</b> button over the chat. This is only for things you set once.</div>
+      <label class="pvx-sw" for="pvx_ai"><input type="checkbox" id="pvx_ai"><span>Allow AI control</span></label>
+      <div class="pvx-hint pvx-warn">The master switch. Off — the toy only listens to you, whatever happens in the scene.</div>
+      <label class="pvx-l">Strength ceiling</label>
+      <select id="pvx_cap" class="text_pole">
+        <option value="5">5 — barely</option><option value="10">10 — soft</option>
+        <option value="14">14 — medium</option><option value="17">17 — strong</option><option value="20">20 — full power</option>
+      </select>
+      <label class="pvx-l">Auto-stop</label>
+      <select id="pvx_max" class="text_pole">
+        <option value="5">after 5 minutes</option><option value="10">after 10 minutes</option>
+        <option value="20">after 20 minutes</option><option value="45">after 45 minutes</option><option value="0">no auto-stop</option>
+      </select>
+      <label class="pvx-l">Safeword</label>
+      <input id="pvx_safe" class="text_pole" type="text" placeholder="stop">
+      <div class="pvx-hint">write it in a message and everything stops</div>
+      <div class="pvx-row">
+        <button class="pvx-b" id="pvx_open">Open the panel ≋</button>
+        <button class="pvx-b pvx-ghost" id="pvx_dock">Put the ≋ button back</button>
+      </div>
+      <div class="pvx-row" style="margin-top:0">
+        <button class="pvx-b pvx-ghost" id="pvx_win">Put the panel window back</button>
+      </div>
+      <div class="pvx-hint">drag the panel window by its header; double-click the header to put it back as well</div>
+      <div class="pvx-hint pvx-foot">Pusya · <a href="https://t.me/pusgir" target="_blank">t.me/pusgir</a></div>
+    </div>
+  </div>
+</div>`;
+
 function mountDrawer() {
     const target = $('#extensions_settings2').length ? '#extensions_settings2' : '#extensions_settings';
-    $(target).append(DRAWER);
+    $(target).append(EN ? DRAWER_EN : DRAWER);
     const h = S().host;
     const save = () => { saveSettingsDebounced(); publishHost(); applyPrompt(); };
 
@@ -273,7 +322,7 @@ jQuery(async () => {
         await loadPanel();
     } catch (e) {
         console.error('[PUSYA VIBE]', e);
-        toastr.error('Не нашла файлы пульта. Переустанови расширение.', 'PUSYA VIBE');
+        toastr.error(EN ? 'Panel files not found. Reinstall the extension.' : 'Не нашла файлы пульта. Переустанови расширение.', 'PUSYA VIBE');
         return;
     }
 

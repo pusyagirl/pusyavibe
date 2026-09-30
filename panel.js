@@ -47,7 +47,7 @@ function TV(){
   try { if (typeof tavo !== 'undefined') return tavo; } catch(e){}
   return null;
 }
-function toast(t){ try { var T = TV(); if (T && T.utils && T.utils.toast) T.utils.toast(t); } catch(e){} }
+function toast(t){ try { if (typeof tr === 'function') t = tr(t); var T = TV(); if (T && T.utils && T.utils.toast) T.utils.toast(t); } catch(e){} }
 function now(){ return Date.now(); }
 function clamp(x, a, b){ x = +x; if (isNaN(x)) x = a; return x < a ? a : (x > b ? b : x); }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]; }); }
@@ -121,6 +121,7 @@ var DEF = {
   toyKind: {},                           // что за игрушка, выбрано руками: { имя: { k, air } }
   toyTell: true,                         // (старое) рассказывать персонажу про игрушку — теперь toyMode
   toyMode: 1,                            // персонаж знает об игрушке: 0 — нет, 1 — если она уже в сцене, 2 — всегда
+  lang: 'auto',                          // язык пульта: auto — как у телефона/браузера, ru, en
   hintOn: true,                          // вторая модель подсказывает, куда вести следующий ответ
   everConnected: false                   // игрушка уже подключалась — экран первого входа не нужен
 };
@@ -192,6 +193,7 @@ function loadCfgFromTavo(){
     var изменилось = false;
     for (var k in DEF){
       if (v[k] === undefined) continue;
+      if (k === 'lang' && lsGet('pv_lang', null)) continue;   // язык выбран на этом устройстве
       var сейчас = JSON.stringify(C[k]);
       if (сейчас !== слепок[k]) continue;                 // это ты только что поменяла
       if (JSON.stringify(v[k]) === сейчас) continue;
@@ -201,6 +203,7 @@ function loadCfgFromTavo(){
     if (C.brain === 'tags' || C.brain === 'local') C.brain = 'live';
     lsSet('pv_cfg_v1', C);
     try { repaintAll(); } catch(e){}
+    try { I18N_CACHE = {}; i18nApply(); } catch(e){}
     log('cfg', 'настройки подхвачены из ' + ХОСТ.родит);
   }).catch(function(){});
 }
@@ -210,7 +213,7 @@ function loadCfgFromTavo(){
    поэтому уходит только «vibe, anon, версия» — ни ника, ни настроек, ни
    предпочтений, ни названия игрушки. На стенде без Таво не стучимся, чтобы
    проверки не считались живыми людьми. */
-var PV_VERSION = '1.16.4';
+var PV_VERSION = '1.17.2';
 (function(){
   function beat(){
     if (!TV()) return;
@@ -338,8 +341,11 @@ DRV.intiface = {
               log('conn', 'связи не было долго — сцену начинаю с тишины');
             }
             E.downSince = 0;
+            // Сначала спрашиваем, кто уже подключён. Искать новых будем, только если
+            // никого нет: поиск Bluetooth рядом с работающей игрушкой мешает ей держать
+            // связь — на айфоне Satisfyer отваливался через пятнадцать секунд.
+            self.scanAsked = false;
             self.tx({ RequestDeviceList: { Id: self.msgId++ } });
-            self.tx({ StartScanning: { Id: self.msgId++ } });
             if (b.MaxPingTime > 0){
               clearInterval(self.pingTimer);
               self.pingTimer = setInterval(function(){ self.tx({ Ping: { Id: self.msgId++ } }); }, Math.max(500, b.MaxPingTime / 2));
@@ -360,9 +366,16 @@ DRV.intiface = {
             var было = self.devices;
             self.devices = {};
             (b.Devices || []).forEach(function(d){ self.addDev(d, было[d.DeviceIndex]); });
+            if (!(b.Devices || []).length && !self.scanAsked){
+              self.scanAsked = true;
+              self.scanning = true;
+              self.tx({ StartScanning: { Id: self.msgId++ } });
+            }
             paintStatus();
           } else if (name === 'DeviceAdded'){
             self.addDev(b); paintStatus();
+            // Игрушка нашлась — дальше искать незачем, поиск только мешает ей держать связь.
+            if (self.scanning){ self.scanning = false; self.tx({ StopScanning: { Id: self.msgId++ } }); }
           } else if (name === 'SensorReading'){
             var dv = self.devices[b.DeviceIndex];
             if (dv && b.Data && b.Data.length){
@@ -382,6 +395,11 @@ DRV.intiface = {
                 ' — это Bluetooth, не наша связь');
             }
             delete self.devices[b.DeviceIndex]; paintStatus();
+            // Последняя игрушка отвалилась — снова ищем, чтобы она вернулась сама.
+            if (!Object.keys(self.devices).length && !self.scanning){
+              self.scanning = true;
+              self.tx({ StartScanning: { Id: self.msgId++ } });
+            }
           } else if (name === 'Error'){
             log('err', 'Intiface: ' + (b.ErrorMessage || ''));
           }
@@ -398,8 +416,15 @@ DRV.intiface = {
           var сек = self.upSince ? Math.round((now() - self.upSince) / 1000) : 0;
           self.upSince = 0;
           E.downSince = now();            // с этого момента считаем, сколько мы без связи
+          /* Айфон замораживает Таво в фоне целиком: плагин не отвечает Intiface на
+             проверку «ты тут?», и через несколько минут Intiface решает, что клиент
+             ушёл, и выключает игрушку («No pongs received»). Закрытие мы узнаём уже
+             по возвращении, поэтому «в фоне» — это и «только что проснулись». */
+          var вФоне = pdoc.hidden || E.hidAt || (E.wokeAt && now() - E.wokeAt < 5000);
           log('conn', 'связь оборвалась' + (сек ? ', держалась ' + сек + ' сек' : '') +
-            (pdoc.hidden ? ' (мы были в фоне)' : ' (мы были на экране)'));
+            (вФоне ? ' — Таво был в фоне: телефон его заморозил, Intiface не дождался ответа и выключил игрушку. ' +
+                     'Пока играешь, держи Таво на экране — Intiface в фоне работает, а Таво нет'
+                   : ' (мы были на экране)'));
           // Оборвалось у нас на глазах — поднимаемся сами, не дожидаясь ухода и возврата.
           if (!pdoc.hidden) setTimeout(autoConnectAgain, 1500);
         }
@@ -421,7 +446,7 @@ DRV.intiface = {
     var scal = msgs.ScalarCmd || [], lin = msgs.LinearCmd || [], rot = msgs.RotateCmd || [];
     this.devices[d.DeviceIndex] = {
       idx: d.DeviceIndex, name: d.DeviceName || ('устройство ' + d.DeviceIndex),
-      scalars: scal.map(function(f, i){ return { i: i, type: String(f.ActuatorType || 'Vibrate'), what: String(f.FeatureDescriptor || '') }; }),
+      scalars: scal.map(function(f, i){ return { i: i, type: String(f.ActuatorType || 'Vibrate'), what: String(f.FeatureDescriptor || ''), steps: +f.StepCount || 20 }; }),
       linear: lin.length, rotate: rot.length,
       since: (прежняя && прежняя.since) || now(),   // сколько уже держится связь с игрушкой
       // Satisfyer — известная болячка Buttplug: рвёт связь под плотным потоком команд.
@@ -439,6 +464,12 @@ DRV.intiface = {
     };
     if (!прежняя && this.devices[d.DeviceIndex].fragile){
       log('dev', 'эта марка не любит частых команд — веду бережно');
+    }
+    // Intiface не прочитал модель (на айфоне бывает) и подключил «вообще Satisfyer»
+    // с одним мотором. У Mono Flex и других двухмоторных второй мотор так пропадает.
+    if (!прежняя && /^satisfyer device$/i.test(String(d.DeviceName || '').trim())){
+      log('err', 'Intiface не распознал модель Satisfyer — моторов может быть меньше, чем есть. ' +
+        'В Intiface: Devices → «Satisfyer Device» → Forget Device, выключи и включи игрушку и поищи заново');
     }
     // В Intiface часто включён тренировочный «Simulated …». Он не игрушка, а
     // заглушка для разработчиков, поэтому по умолчанию его не трогаем — иначе
@@ -469,8 +500,14 @@ DRV.intiface = {
     });
   },
   tx: function(obj){ try { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify([obj])); } catch(e){} },
-  send: function(out, only){
+  send: function(out, only, толчок){
     var self = this;
+    // Одно деление шкалы самой игрушки вниз: команда настоящая, и Intiface её
+    // передаёт, а на ощупь разницы нет. Ноль не трогаем — тишина остаётся тишиной.
+    var pct2 = function(lvl, f){
+      var v = pct(lvl);
+      return (толчок && v > 0) ? Math.max(0, v - 1 / Math.max(1, f.steps || 20)) : v;
+    };
     Object.keys(this.devices).forEach(function(key){
       var d = self.devices[key], scal = [];
       // Игрушек может быть несколько: выключенную в панели не трогаем,
@@ -487,7 +524,7 @@ DRV.intiface = {
         d.scalars.forEach(function(f){
           var lvl = n++ === 0 ? out.v : out.w;
           if (/inflat/i.test(f.type)) lvl = out.p || 0;
-          scal.push({ Index: f.i, Scalar: pct(lvl), ActuatorType: f.type });
+          scal.push({ Index: f.i, Scalar: pct2(lvl, f), ActuatorType: f.type });
         });
         if (scal.length) self.tx({ ScalarCmd: { Id: self.msgId++, DeviceIndex: d.idx, Scalars: scal } });
         var второй = d.scalars.length ? out.w : out.v;
@@ -504,7 +541,7 @@ DRV.intiface = {
         else if (/constrict|suction/i.test(f.type)) lvl = out.s || out.v;
         else if (/inflat/i.test(f.type)) lvl = out.p || 0;
         else if (/oscillat/i.test(f.type)) lvl = out.t || out.v;
-        scal.push({ Index: f.i, Scalar: pct(lvl), ActuatorType: f.type });
+        scal.push({ Index: f.i, Scalar: pct2(lvl, f), ActuatorType: f.type });
       });
       if (scal.length) self.tx({ ScalarCmd: { Id: self.msgId++, DeviceIndex: d.idx, Scalars: scal } });
       if (d.rotate) self.tx({ RotateCmd: { Id: self.msgId++, DeviceIndex: d.idx, Rotations: [{ Index: 0, Speed: pct(out.r || out.v), Clockwise: true }] } });
@@ -895,7 +932,7 @@ function engineTick(){
 
   // Для капризных игрушек огрубляем шкалу вдвое: 0,2,4… Нарастание на слух то же,
   // а команд по Bluetooth в разы меньше — рвать связь становится нечему.
-  if ((fragileToy() || C.gentle) && !(E.manual > 0) && !E.mine){
+  if ((fragileToy() || C.gentle) && !(E.manual > 0)){
     КАН.forEach(function(c){
       if (out[c] > 0) out[c] = Math.max(1, Math.round(out[c] / 2) * 2);
     });
@@ -914,7 +951,8 @@ function engineTick(){
   // и роняет соединение, если сыпать командами каждые 250 мс. Промежуточные
   // значения просто пропускаем — следующий такт отправит то, что накопилось.
   var minGap = D && D.id === 'phone' ? 0 : (C.gentle || fragileToy() ? 1000 : 380);
-  if (E.noSmooth) minGap = Math.min(minGap, 250);   // проверка короткая, захлебнуться нечем
+  // проверка короткая, захлебнуться нечем — но Satisfyer и тут не чаще раза в секунду
+  if (E.noSmooth && !(C.gentle || fragileToy())) minGap = Math.min(minGap, 250);
   var gapOk = (t - E.lastSendAt) >= minGap;
   var quietNow = !any;                       // тишину шлём сразу, без задержек
 
@@ -928,9 +966,33 @@ function engineTick(){
   // Поэтому раз в десять секунд повторяем текущий уровень, даже если это ноль:
   // шесть команд в минуту, захлебнуться тут нечем, а канал остаётся живым.
   var тепло = D && D.id === 'intiface' && (t - E.lastSendAt) > 10000;
+  /* Intiface 3.2 на айфоне: Satisfyer на ровном уровне замолкает через минуту, хотя
+     связь цела и плагин шлёт команды. Повтор того же значения Intiface до игрушки не
+     доносит, а свой поддерживающий сигнал она, видимо, перестала получать. Поэтому,
+     пока играет ровно, раз в 2,5 секунды шлём уровень на одно деление ниже и обратно:
+     это настоящая команда по Bluetooth, а на ощупь её не слышно. Раз в 2,5 секунды —
+     реже, чем бережный темп для Satisfyer, так что связь это не перегружает. */
+  var толкнуть = D && D.id === 'intiface' && fragileToy() && any && sig === E.lastOut &&
+                 (t - E.lastSendAt) > 2500;
 
-  if (D && D.state === 'on' && (sig !== E.lastOut || (any && stale) || тепло) && (gapOk || quietNow)){
-    E.lastOut = sig; E.lastSendAt = t;
+  /* Satisfyer рвёт Bluetooth не только от частоты, но и от сплошного потока: команда
+     каждую секунду минуту подряд. После 1.14 такого стало больше — волна в паузах,
+     дыхание, плавный отказ. Мелкие колебания (меньше двух делений) шлём не чаще раза
+     в три секунды: на ощупь разницы нет, а команд втрое меньше. Тишину и заметные
+     перемены — сразу, как раньше. */
+  var мелочь = false;
+  if ((fragileToy() || C.gentle) && any && !тепло && sig !== E.lastOut && t - E.lastSendAt < 3000){
+    var сейчасУр = Math.max(out.v, out.r, out.s, out.t, out.d ? out.w : 0);
+    мелочь = Math.abs(сейчасУр - (E.lastLvl || 0)) < 2 && (E.lastLvl || 0) > 0;
+  }
+  if (толкнуть && D.state === 'on'){
+    E.lastSendAt = t;
+    E.толчок = !E.толчок;
+    try { D.send(out, only, E.толчок); } catch(e){}
+  } else
+  if (!мелочь && D && D.state === 'on' && (sig !== E.lastOut || (any && stale) || тепло) && (gapOk || quietNow)){
+    E.lastOut = sig; E.lastSendAt = t; E.толчок = false;
+    E.lastLvl = any ? Math.max(out.v, out.r, out.s, out.t, out.d ? out.w : 0) : 0;
     // На «грелке» шлём обычную команду с нулями, а не Stop: Stop у части прошивок
     // означает «разговор окончен», и следом игрушка засыпает.
     try { (any || тепло) ? D.send(out, only) : D.stop(); } catch(e){}
@@ -961,10 +1023,12 @@ var testTimer = null;
 function runTest(){
   if (!D || D.state !== 'on'){ toast('сначала подключись'); return; }
   var top = clamp(Math.min(12, capLevel()), 1, 20), шаги = [];
-  // полсекунды толчок, полсекунды тишина, три раза — ровно три секунды
+  // Полсекунды толчок, полсекунды тишина, три раза — три секунды. Satisfyer же
+  // падает от команд чаще раза в секунду, поэтому ему толчки по секунде.
+  var бережно = fragileToy() || C.gentle, такт = бережно ? 1 : 0.5;
   for (var i = 0; i < 3; i++){
-    шаги.push(step({ v: top }, 0.5));
-    шаги.push(step({ v: 0 }, 0.5));
+    шаги.push(step({ v: top }, такт));
+    шаги.push(step({ v: 0 }, такт));
   }
   playProgram(шаги, 0, { exact: true, mine: true, loop: false, raw: true });
   clearTimeout(testTimer);
@@ -975,8 +1039,8 @@ function runTest(){
     E.lastOut = '';
     try { if (D) D.stop(); } catch(e){}
     paintMeter();
-  }, 3300);
-  log('test', 'тест: три коротких толчка по ' + top + '/20 — три секунды');
+  }, бережно ? 6300 : 3300);
+  log('test', 'тест: три толчка по ' + top + '/20 — ' + (бережно ? 'шесть' : 'три') + ' секунды');
 }
 
 function playProgram(steps, fromIdx, opts){
@@ -1132,6 +1196,7 @@ function autoConnect(){
 function autoConnectAgain(){ autoTries = 0; autoConnect(); }
 
 function onWake(){
+  E.wokeAt = now();
   wakeLockOn();
   if (E.hidAt){
     var away = now() - E.hidAt; E.hidAt = 0;
@@ -1409,9 +1474,44 @@ function сценаГорячая(){
             (E.prog.length && Math.max(E.live.v, E.live.s, E.live.t, E.live.r) >= capLevel() * 0.5));
 }
 
+/* ═══════════════ язык ═══════════════ */
+/* Два разных языка. Пульт — на языке телефона или браузера, либо какой выбрали
+   в настройках. А подсказки модели — на языке самой переписки: англоязычный
+   ролеплей с русскими вставками в промпте сбивает модель на русский. */
+function uiLang(){
+  // Выбор хранится на самом устройстве: настройки из Таво общие для всех устройств
+  // и при запуске затирали выбранный English старым «авто».
+  var l = lsGet('pv_lang', null) || C.lang || 'auto';
+  if (l === 'ru' || l === 'en') return l;
+  // «Авто» — как у самого Таво: его язык выбирают в настройках приложения, и он
+  // может не совпадать с языком телефона. Нет его — язык телефона или браузера.
+  var n = tavoLocale();
+  if (!n){ try { n = String((pwin.navigator || navigator).language || ''); } catch(e){} }
+  return /^(ru|uk|be|kk)/i.test(n) ? 'ru' : 'en';
+}
+function tavoI18n(){
+  try { var T = TV(); return (T && T.plugin && T.plugin.i18n) || null; } catch(e){ return null; }
+}
+function tavoLocale(){
+  try { var i = tavoI18n(); return i && i.locale ? String(i.locale) : ''; } catch(e){ return ''; }
+}
+var ЯЗЫК_ЧАТА = '';
+function языкПо(тексты){
+  var кир = 0, лат = 0;
+  тексты.forEach(function(t){
+    t = String(t || '').replace(/<[^>]*>/g, ' ').replace(/\[[A-Z_]+\][\s\S]*?\[\/[A-Z_]+\]/g, ' ');
+    кир += (t.match(/[а-яё]/gi) || []).length;
+    лат += (t.match(/[a-z]/gi) || []).length;
+  });
+  if (кир + лат < 40) return '';
+  return кир >= лат ? 'ru' : 'en';
+}
+function promptLang(){ return ЯЗЫК_ЧАТА || uiLang(); }
+function EN(){ return promptLang() === 'en'; }
+
 function кемЗовут(){
   // имя в начальной форме: склонять чужие имена плагин не умеет
-  return (NAMES.user && NAMES.user !== 'ты') ? NAMES.user : 'пользователь';
+  return (NAMES.user && NAMES.user !== 'ты') ? NAMES.user : (EN() ? 'the user' : 'пользователь');
 }
 
 /* ═══════════════ паспорт игрушки для персонажа ═══════════════ */
@@ -1424,11 +1524,15 @@ var toyToldAt = 0;
 /* Игрушка в сцене — это когда о ней уже написано: в переписке или в карточке
    персонажа. Слова строже, чем для команд: «пульт от телевизора» и «вибрация
    телефона» сюда не должны попадать. */
-var TOY_SCENE_RE = new RegExp('(?:вибратор|игрушк|вибропул|виброяйц|массаж[её]р|стимулятор|мастурбатор|вибрирующ)[а-яё]*', 'i');   // СЛ объявлен ниже — здесь его ещё нет
+var TOY_SCENE_RE = new RegExp('(?:вибратор|игрушк|вибропул|виброяйц|массаж[её]р|стимулятор|мастурбатор|вибрирующ)[а-яё]*|' +
+  '\\b(?:vibrator|vibe|sex toy|toy|bullet|love egg|wand|massager|dildo|butt ?plug|stroker|fleshlight|vibrating)', 'i');   // СЛ объявлен ниже — здесь его ещё нет
 var игрушкаВЧате = false, игрушкаВКарточке = false;
 function toyInScene(){ return игрушкаВЧате || игрушкаВКарточке; }
 // Есть ли игрушка в сцене — по последним сообщениям обеих сторон.
 function toyInChatFrom(all){
+  var былЯзык = ЯЗЫК_ЧАТА;
+  ЯЗЫК_ЧАТА = языкПо((all || []).slice(-8).map(function(x){ return x.content || x.text || ''; })) || ЯЗЫК_ЧАТА;
+  if (былЯзык !== ЯЗЫК_ЧАТА) buildPrompt();
   var была = игрушкаВЧате;
   игрушкаВЧате = (all || []).slice(-30).some(function(x){ return TOY_SCENE_RE.test(String(x.content || x.text || '')); });
   if (была !== игрушкаВЧате){ buildPrompt(); paintToyMode(); }
@@ -1458,10 +1562,19 @@ function toyPrompt(ход){
   var первый = !toyToldAt;
   if (!первый && !сценаГорячая() && (genCount % Math.max(1, C.fetEvery)) !== 0) return '';
   if (ход) toyToldAt = now();
+  var en = EN();
   var описания = caps.kinds.map(function(p){
-    var t = passportText(p);
+    var t = passportText(p, en);
     return t ? t + ' (' + p.name + ')' : p.name;
   });
+  if (en) return '[Toy]\n' +
+    кемЗовут().replace(/^./, function(x){ return x.toUpperCase(); }) + ' is using a real toy right now: ' + описания.join('; ') + '. ' +
+    'It can do: ' + caps.briefEn + '.\n' +
+    'If the toy appears in the scene, describe exactly this one, with its shape and sensations. ' +
+    'Don\'t bring it in yourself unless the scene leads there.\n' +
+    'The character can control it with words and it will really respond: turn it on, off, up, down, ' +
+    '"to the minimum", "to the max", "to the second setting", switch to a wave, pulsing or teasing mode.\n' +
+    'Don\'t mention the plugin and don\'t write technical notes.';
   return '[Игрушка]\n' +
     кемЗовут() + ' сейчас с настоящей игрушкой: ' + описания.join('; ') + '. ' +
     'Умеет: ' + caps.brief + '.\n' +
@@ -1480,7 +1593,8 @@ function hintPrompt(ход){
   if (!C.hintOn || C.brain !== 'model' || !HINT.text) return '';
   if (now() - HINT.at > 10 * 60000 || HINT.used >= 2) return '';   // устаревшую не тащим
   if (ход) HINT.used++;
-  return '[Направление сцены]\n' + HINT.text + '\nЭто про ход повествования — в тексте об этом не упоминай.';
+  return EN() ? '[Scene direction]\n' + HINT.text + '\nThis is about where the story goes — don\'t mention it in the text.'
+              : '[Направление сцены]\n' + HINT.text + '\nЭто про ход повествования — в тексте об этом не упоминай.';
 }
 
 function takeHint(reply){
@@ -1500,6 +1614,8 @@ function paintPeek(){
   if (m) m.textContent = PEEK.main || (host().aiControl ? 'сейчас ничего — сцена спокойная или напоминать нечего' : 'ничего: рубильник «Разрешить ИИ управлять» выключен');
   if (a) a.textContent = PEEK.ask || (C.brain === 'model' ? 'ещё не спрашивала' : 'вторая модель выключена — сцену ведут слова');
   if (o) o.textContent = PEEK.out || '—';
+  // настоящие промпты и ответы показываем как есть — перевод их бы исказил
+  [[m, PEEK.main], [a, PEEK.ask], [o, PEEK.out]].forEach(function(x){ if (x[0]){ if (x[1]) x[0].setAttribute('data-noi18n', '1'); else x[0].removeAttribute('data-noi18n'); } });
   if (w) w.textContent = (PEEK.mainAt ? 'основной — обновлено в ' + hh(PEEK.mainAt) : '') + (PEEK.at ? ' · второй — в ' + hh(PEEK.at) : '');
 }
 
@@ -1522,12 +1638,28 @@ var PACE = [
   'прежде чем сцена куда-то придёт.'
 ];
 
+var PACE_EN = [
+  'Don\'t wrap intimacy up in a few lines. Build it in stages: approach, lingering, a change of rhythm, ' +
+  'a step back, a return. Leave room between stages — a breath, a look, a word.',
+
+  'Hold the scene longer than it asks for. Let the body change its mind: slow down where speed is expected, ' +
+  'and stop where continuation is expected.',
+
+  'Change at least one thing in this reply: the pace, the position, who leads, what the hands are doing. ' +
+  'Don\'t repeat the order of actions from the previous reply.',
+
+  'Don\'t rush toward the finish. Let the tension rise and fall several times ' +
+  'before the scene arrives anywhere.'
+];
+
 function pacePrompt(){
   if (!C.paceHint) return '';
   // Просить «не торопись» посреди разговора о завтраке — верный способ получить
   // странный ответ. Поэтому только когда сцена уже горячая.
   if (!сценаГорячая()) return '';
   var i = Math.abs(genCount) % PACE.length;
+  if (EN()) return '[Scene pace]\n' + PACE_EN[i] + '\nThis is about narrative rhythm, not an instruction for the character — ' +
+                   'don\'t mention it in the text.';
   return '[Темп сцены]\n' + PACE[i] + '\nЭто про ритм повествования, а не указание персонажу — ' +
          'в тексте об этом не упоминай.';
 }
@@ -1538,6 +1670,7 @@ function pacePrompt(){
    тому, кто ведёт сцену — иначе персонаж просит всасывание у обычной вибропули. */
 
 var CH_RU = { v: 'вибрация', r: 'вращение', s: 'всасывание', p: 'накачка', t: 'фрикции' };
+var CH_EN = { v: 'vibration', r: 'rotation', s: 'suction', p: 'inflation', t: 'thrusting' };
 
 // Lovense не рассказывает о себе — узнаём по названию модели.
 var LOVENSE_CAPS = {
@@ -1598,8 +1731,11 @@ function toyCaps(){
   var brief = Object.keys(ch).map(function(c){
     return CH_RU[c] + (ch[c] > 1 ? ' ×' + ch[c] : '');
   }).join(' + ');
+  var briefEn = Object.keys(ch).map(function(c){
+    return CH_EN[c] + (ch[c] > 1 ? ' ×' + ch[c] : '');
+  }).join(' + ');
 
-  return { ch: ch, names: names, brief: brief, known: known, kinds: kinds, has: function(c){ return !!ch[c]; } };
+  return { ch: ch, names: names, brief: brief, briefEn: briefEn, known: known, kinds: kinds, has: function(c){ return !!ch[c]; } };
 }
 
 /* ═══════════════ что это за игрушка ═══════════════ */
@@ -1609,17 +1745,17 @@ function toyCaps(){
    а если не вышло или угадали не то — выбирает сама пользовательница. */
 
 var TOY_KINDS = {
-  'внешняя':     { ru: 'внешняя, для клитора',                 кто: 'она' },
-  'кролик':      { ru: 'внутрь и снаружи сразу (кролик)',      кто: 'она' },
-  'внутренняя':  { ru: 'вводится внутрь',                      кто: 'любой' },
-  'пара':        { ru: 'для пары, носится во время близости',  кто: 'она' },
-  'анальная':    { ru: 'анальная пробка',                      кто: 'любой' },
-  'простата':    { ru: 'массажёр простаты',                    кто: 'он' },
-  'мастурбатор': { ru: 'мастурбатор, надевается на член',      кто: 'он' },
-  'кольцо':      { ru: 'эрекционное виброкольцо',              кто: 'он' },
-  'машина':      { ru: 'секс-машина, толкается сама',          кто: 'любой' },
-  'соски':       { ru: 'для сосков',                           кто: 'любой' },
-  'пуля':        { ru: 'вибропуля или массажёр, куда приложишь', кто: 'любой' }
+  'внешняя':     { ru: 'внешняя, для клитора', en: 'external, for the clitoris',                 кто: 'она' },
+  'кролик':      { ru: 'внутрь и снаружи сразу (кролик)', en: 'inside and outside at once (rabbit)',      кто: 'она' },
+  'внутренняя':  { ru: 'вводится внутрь', en: 'inserted inside',                      кто: 'любой' },
+  'пара':        { ru: 'для пары, носится во время близости', en: 'for couples, worn during sex',  кто: 'она' },
+  'анальная':    { ru: 'анальная пробка', en: 'anal plug',                      кто: 'любой' },
+  'простата':    { ru: 'массажёр простаты', en: 'prostate massager',                    кто: 'он' },
+  'мастурбатор': { ru: 'мастурбатор, надевается на член', en: 'masturbator, worn on the penis',      кто: 'он' },
+  'кольцо':      { ru: 'эрекционное виброкольцо', en: 'vibrating cock ring',              кто: 'он' },
+  'машина':      { ru: 'секс-машина, толкается сама', en: 'sex machine, thrusts on its own',          кто: 'любой' },
+  'соски':       { ru: 'для сосков', en: 'for nipples',                           кто: 'любой' },
+  'пуля':        { ru: 'вибропуля или массажёр, куда приложишь', en: 'bullet or wand, wherever you hold it', кто: 'любой' }
 };
 
 // Порядок важен: сначала узкие названия, потом общие слова.
@@ -1695,8 +1831,14 @@ function toyPassport(name, dev){
 }
 
 // Как сказать словами: «внешняя, для клитора; вакуумно-волновая».
-function passportText(p){
-  if (!p || !p.k) return p && p.air ? 'с воздушной стимуляцией' : '';
+function passportText(p, en){
+  if (!p || !p.k) return p && p.air ? (en ? 'with air stimulation' : 'с воздушной стимуляцией') : '';
+  if (en){
+    var e = TOY_KINDS[p.k].en;
+    if (p.air) e += p.k === 'мастурбатор' ? '; squeezes with air chambers'
+                                          : '; air-pulse — stimulates with waves of air, no direct contact';
+    return e;
+  }
   var s = TOY_KINDS[p.k].ru;
   if (p.air) s += p.k === 'мастурбатор' ? '; сжимает воздушными камерами'
                                           : '; вакуумно-волновая — стимулирует потоком воздуха, без прямого касания';
@@ -1768,9 +1910,13 @@ function mainChannel(){
 var MARK = [
   { w: 6,  src: 'касан|ладон|гладит|шепч|шёпот|поцелу|целу|прижим|обнима|мурашк|кожа|дыхани' },
   { w: 11, src: 'стон|выгиба|дрож|бедр|между ног|влажн|сосок|соски|язык|пальц|трётся|вцеп|кусает|задыха|сжима|бельё|обнаж' },
-  { w: 17, src: 'глубже|быстрее|ещё сильнее|толчк|входит|внутри|содрога|умоля|на грани|не выдерж|срыва|оргазм|кончает|кончи|пик наслажд' }
+  { w: 17, src: 'глубже|быстрее|ещё сильнее|толчк|входит|внутри|содрога|умоля|на грани|не выдерж|срыва|оргазм|кончает|кончи|пик наслажд' },
+  // English — те же три ступени. Короткие слова закрыты границей справа: «hug» не должен ловить «huge».
+  { w: 6,  src: 'touch|caress|strok(?:e|es|ed|ing)\\b|palm|whisper|kiss|embrac|hug(?:s|ged|ging)?\\b|goosebump|shiver|breath|nuzzl|skin\\b' },
+  { w: 11, src: 'moan|arch(?:es|ed|ing)\\b|trembl|quiver|thigh|between (?:her|his|my|your) legs|wet(?:ness)?\\b|nipple|tongue|finger|grind|clutch|gasp|squeez|lingerie|undress|naked' },
+  { w: 17, src: 'deeper|faster|harder|thrust|inside (?:her|him|me|you)|enter(?:s|ed|ing)? (?:her|him|me|you)|convuls|beg(?:s|ged|ging)\\b|on the edge|can.t take|orgasm|climax|cum(?:s|ming)?\\b|coming undone|shatter' }
 ];
-var MARK_RE = MARK.map(function(g){ return { w: g.w, re: new RegExp('(^|[^а-яёА-ЯЁ])(' + g.src + ')', 'gi') }; });
+var MARK_RE = MARK.map(function(g){ return { w: g.w, re: new RegExp('(^|[^а-яёА-ЯЁa-zA-Z])(' + g.src + ')', 'gi') }; });
 
 /* Прямые команды словами.
 
@@ -1783,18 +1929,18 @@ var MARK_RE = MARK.map(function(g){ return { w: g.w, re: new RegExp('(^|[^а-я�
    прочиталось бы как «остановись». */
 // «Не останавливайся» — это приказ продолжать. Вырезаем такие обороты из текста
 // заранее, иначе внутри них найдётся «останавливайся» и прочитается наоборот.
-var ORDER_NOT = /не\s+(?:смей\s+)?(?:останавлива[а-яё]*|останови[а-яё]*|прекраща[а-яё]*|переставай|тормози[а-яё]*)/gi;
+var ORDER_NOT = /не\s+(?:смей\s+)?(?:останавлива[а-яё]*|останови[а-яё]*|прекраща[а-яё]*|переставай|тормози[а-яё]*)|\b(?:don['’]?t|do not|never|please don['’]?t)\s+stop\b|\bkeep going\b/gi;
 
 var ORDERS_RE = [
-  { d: 'вверх', re: 'сильн(?:ее|ей)|быстр(?:ее|ей)|глубже|ж[её]стче|резче|грубее' },
-  { d: 'вниз',  re: 'медленн(?:ее|ей)|помедленн[а-яё]*|потише|тише|нежн(?:ее|ей)|осторожн(?:ее|ей)|полегче|мягче' },
-  { d: 'стоп',  re: 'остановись|останови[а-яё]*|замри|не\\s+двигайся|перестань|хватит|подожди|погоди' }
+  { d: 'вверх', re: 'сильн(?:ее|ей)|быстр(?:ее|ей)|глубже|ж[её]стче|резче|грубее|harder|faster|deeper|rougher|stronger' },
+  { d: 'вниз',  re: 'медленн(?:ее|ей)|помедленн[а-яё]*|потише|тише|нежн(?:ее|ей)|осторожн(?:ее|ей)|полегче|мягче|slower|slow down|gentler|softer|easy now|ease up' },
+  { d: 'стоп',  re: 'остановись|останови[а-яё]*|замри|не\\s+двигайся|перестань|хватит|подожди|погоди|stop|freeze|don[\'’]?t move|enough|wait|hold on' }
 ].map(function(o){
   /* Хвост важен не меньше самого слова. «— Сильнее, — выдохнул он» — это приказ,
      а «он сильнее её физически» — описание. Разница в том, что после приказа
      фраза кончается: запятая, точка, тире, кавычка. Требуем этот хвост —
      и половина ложных срабатываний отваливается сама. */
-  return { d: o.d, re: new RegExp('(?:^|[^а-яёА-ЯЁ])(?:' + o.re + ')(?=\\s*(?:[,.!?…:;»"”)\\-—]|$))', 'gi') };
+  return { d: o.d, re: new RegExp('(?:^|[^а-яёА-ЯЁa-zA-Z])(?:' + o.re + ')(?=\\s*(?:[,.!?…:;»"”)\\-—]|$))', 'gi') };
 });
 
 // Вернёт последнюю команду в тексте или '' — если приказов там нет.
@@ -1833,43 +1979,62 @@ function orderOf(text){
 var СЛ = '[а-яё]*';
 
 var DEV_RE = new RegExp('(?:вибратор|игрушк|вибропул|виброяйц|пробк|массаж[её]р|стимулятор|' +
-  'пульт|вибрац|виброкольц|зажим|мастурбатор)' + СЛ, 'gi');
+  'пульт|вибрац|виброкольц|зажим|мастурбатор)' + СЛ +
+  '|\\b(?:vibrat|vibe|toy|bullet|egg|wand|massager|remote|plug|clamp|stroker|fleshlight)[a-z]*', 'gi');
+
+// По-английски глагол и частица стоят врозь: «turned the vibrator up» — между ними до трёх слов.
+var МЕЖ = '\\s+(?:[\\w’\']+\\s+){0,3}';
+var DEV_ACTS_EN = {
+  'выкл': '\\b(?:(?:turn|switch|shut|click|flick)(?:s|ed|ing)?' + МЕЖ + 'off\\b|(?:pull|slid|slide)(?:s|ed|ing)?' + МЕЖ + 'out\\b|' +
+          '(?:put|set|toss)(?:s|ting)?' + МЕЖ + '(?:away|aside)\\b)',
+  'вкл':  '\\b(?:(?:turn|switch|click|flick)(?:s|ed|ing)?' + МЕЖ + 'on\\b|activat(?:es|ed|ing)\\b|insert(?:s|ed|ing)?\\b|' +
+          '(?:press|hold)(?:es|ed|ing|s)?' + МЕЖ + '(?:against|to)\\b|(?:slid|slide|slip|push|ease)(?:s|d|es|ed|ing|ped)?' + МЕЖ + '(?:in|inside|into)\\b|buzz(?:es|ed|ing)? to life)',
+  'выше': '\\b(?:(?:turn|crank|dial|ramp|kick|bump|notch)(?:s|ed|ing)?' + МЕЖ + 'up\\b|increas(?:es|ed|ing)\\b|intensif(?:y|ies|ied)\\b|boost(?:s|ed)?\\b)',
+  'ниже': '\\b(?:(?:turn|dial|tone|ease|notch)(?:s|ed|ing)?' + МЕЖ + 'down\\b|lower(?:s|ed|ing)?\\b|decreas(?:es|ed|ing)\\b|reduc(?:es|ed|ing)\\b)'
+};
 
 var DEV_ACTS = [
   { a: 'выкл', re: 'выключ|отключ|вырубил|убрал|вынул|отложил|отобрал|погасил' },
   { a: 'вкл',  re: 'включ|запустил|врубил|прижал|прижима|приставил|вставил|вв[ёе]л|ввела|над[ае]л|закрепил' },
   { a: 'выше', re: 'прибав|усилил|усилива|выкрутил|увеличил|подда|разогнал' },
   { a: 'ниже', re: 'убав|сбавил|снизил|уменьшил|ослабил|приглушил' }
-].map(function(x){ return { a: x.a, re: new RegExp('(?:^|[^а-яё])(?:' + x.re + ')' + СЛ, 'gi') }; });
+].map(function(x){ return { a: x.a, re: new RegExp('(?:^|[^а-яё])(?:' + x.re + ')' + СЛ + '|' + DEV_ACTS_EN[x.a], 'gi') }; });
 
 // Насколько именно выкрутил.
 var DEV_LVL = [
   { k: 'макс', re: 'на\\s+максимум|до\\s+упора|на\\s+полную|на\\s+всю\\s+(?:катушку|мощность)|на\\s+самый\\s+сильн' },
   { k: 'сред', re: 'вполсилы|наполовину|на\\s+средн|на\\s+половин' },
-  { k: 'мин',  re: 'на\\s+минимум|на\\s+самый\\s+слаб|на\\s+самую\\s+слаб|еле\\s+слышн|чуть\\s+слышн|на\\s+самую\\s+малую' }
+  { k: 'мин',  re: 'на\\s+минимум|на\\s+самый\\s+слаб|на\\s+самую\\s+слаб|еле\\s+слышн|чуть\\s+слышн|на\\s+самую\\s+малую' },
+  { k: 'макс', re: '\\bto\\s+(?:the\\s+)?max(?:imum)?\\b|\\ball\\s+the\\s+way\\s+up|\\bfull\\s+(?:blast|power|speed)|\\bto\\s+full\\b|\\bhighest\\s+(?:setting|speed|level)|\\bas\\s+high\\s+as\\s+it\\s+goes' },
+  { k: 'сред', re: '\\bhalf(?:way|\\s+power|\\s+speed)\\b|\\bmedium\\s+(?:setting|speed|level)|\\bto\\s+(?:the\\s+)?middle\\b' },
+  { k: 'мин',  re: '\\bto\\s+(?:the\\s+)?min(?:imum)?\\b|\\blowest\\s+(?:setting|speed|level)|\\bbarely\\s+(?:on|there|audible)|\\bfaintest\\b' }
 ].map(function(x){ return { k: x.k, re: new RegExp('(?:' + x.re + ')' + СЛ, 'gi') }; });
 
 var DEV_ORD = new RegExp('(перв|втор|трет|четв[ёе]рт|пят)' + СЛ +
-  '\\s+(?:скорост|режим|уровен|ступен|позици)' + СЛ, 'gi');
+  '\\s+(?:скорост|режим|уровен|ступен|позици)' + СЛ +
+  '|\\b(first|second|third|fourth|fifth)\\s+(?:speed|setting|mode|level|gear)\\b' +
+  '|\\b(?:speed|setting|mode|level|gear)\\s+(one|two|three|four|five|[1-5])\\b', 'gi');
 // «на 60%», «до семидесяти процентов». Голое «0%» не берём: это строка чьей-то
 // статистики под ответом («attachment: 0%»), а не игрушка, выкрученная в ноль.
-var DEV_PCT = new RegExp('(?:на|до)\\s+(\\d{1,3})\\s*(?:%|процент' + СЛ + ')', 'gi');
-var ORD_N = { 'перв': 1, 'втор': 2, 'трет': 3, 'четвёрт': 4, 'четверт': 4, 'пят': 5 };
+var DEV_PCT = new RegExp('(?:на|до|to|at)\\s+(\\d{1,3})\\s*(?:%|процент' + СЛ + '|\\s*percent)', 'gi');
+var ORD_N = { 'перв': 1, 'втор': 2, 'трет': 3, 'четвёрт': 4, 'четверт': 4, 'пят': 5,
+              first: 1, second: 2, third: 3, fourth: 4, fifth: 5, one: 1, two: 2, three: 3, four: 4, five: 5,
+              '1': 1, '2': 2, '3': 3, '4': 4, '5': 5 };
 
 // Названия режимов совпадают с готовыми паттернами — грех не воспользоваться.
 var DEV_PRESET = [
-  { p: 'волна',        re: new RegExp('волн' + СЛ, 'gi') },
-  { p: 'пульс',        re: new RegExp('пульсац' + СЛ + '|пульсир' + СЛ + '|импульс' + СЛ + '|толчками', 'gi') },
-  { p: 'крещендо',     re: new RegExp('крещендо|нарастающ' + СЛ, 'gi') },
-  { p: 'прибой',       re: new RegExp('прибо' + СЛ, 'gi') },
-  { p: 'сердцебиение', re: new RegExp('сердцебиен' + СЛ + '|как\\s+сердце', 'gi') },
-  { p: 'дразнилка',    re: new RegExp('дразнящ' + СЛ, 'gi') },
-  { p: 'цунами',       re: new RegExp('цунами', 'gi') },
-  { p: 'лесенка',      re: new RegExp('лесенк' + СЛ + '|ступенями|ступеньк' + СЛ, 'gi') },
-  { p: 'разгон',       re: new RegExp('разгон' + СЛ + '|всё\\s+чаще|все\\s+чаще', 'gi') },
-  { p: 'гром',         re: new RegExp('гром' + СЛ + '|молни' + СЛ, 'gi') },
-  { p: 'рябь',         re: new RegExp('ряб' + СЛ, 'gi') },
-  { p: 'прилив',       re: new RegExp('прилив' + СЛ, 'gi') }
+  { p: 'волна',        re: new RegExp('волн' + СЛ + '|wave(?:s|y)?\\b', 'gi') },
+  { p: 'пульс',        re: new RegExp('пульсац' + СЛ + '|пульсир' + СЛ + '|импульс' + СЛ + '|толчками' + '|puls(?:e|es|ing|ating)\\b', 'gi') },
+  { p: 'крещендо',     re: new RegExp('крещендо|нарастающ' + СЛ + '|crescendo|build(?:s|ing)?\\s+up', 'gi') },
+  { p: 'прибой',       re: new RegExp('прибо' + СЛ + '|surf\\b', 'gi') },
+  { p: 'сердцебиение', re: new RegExp('сердцебиен' + СЛ + '|как\\s+сердце' + '|heartbeat', 'gi') },
+  { p: 'дразнилка',    re: new RegExp('дразнящ' + СЛ + '|teas(?:e|ing)\\s+mode|teasing\\s+(?:setting|pattern)', 'gi') },
+  { p: 'цунами',       re: new RegExp('цунами' + '|tsunami', 'gi') },
+  { p: 'лесенка',      re: new RegExp('лесенк' + СЛ + '|ступенями|ступеньк' + СЛ + '|stair|step(?:s|wise)\\b', 'gi') },
+  { p: 'разгон',       re: new RegExp('разгон' + СЛ + '|всё\\s+чаще|все\\s+чаще' + '|faster\\s+and\\s+faster|accelerat', 'gi') },
+  { p: 'гром',         re: new RegExp('гром' + СЛ + '|молни' + СЛ + '|thunder|lightning', 'gi') },
+  { p: 'рябь',         re: new RegExp('ряб' + СЛ + '|ripple', 'gi') },
+  { p: 'прилив',       re: new RegExp('прилив' + СЛ + '|\\btide', 'gi') }
 ];
 
 /* Ищем по предложениям, а не по окну в символах. «Вибратор лежал в ящике.
@@ -1909,10 +2074,11 @@ function deviceActOf(text){
      как «выключил вибратор». Во второй фразе должно быть либо местоимение на него
      («включил его»), либо указание силы («включил на максимум») — так пишут, когда
      речь всё ещё о нём. */
-  var МЕСТ = /(?:^|[^а-яё])(?:его|е[ёе]|ей|им|ею|н[её]м|ней)(?:[^а-яё]|$)/i;
+  var МЕСТ = /(?:^|[^а-яё])(?:его|е[ёе]|ей|им|ею|н[её]м|ней)(?:[^а-яё]|$)|\bit\b/i;
   var СИЛА = new RegExp('на\\s+(?:максимум|минимум|полную|средн|половин|самый|самую)|до\\s+упора|' +
     'вполсилы|наполовину|\\d{1,3}\\s*(?:%|процент)|(?:перв|втор|трет|четв|пят)' + СЛ +
-    '\\s+(?:скорост|режим|уровен|ступен)', 'i');
+    '\\s+(?:скорост|режим|уровен|ступен)|\\bto\\s+(?:the\\s+)?(?:max|min)|\\bfull\\s+blast|\\ball\\s+the\\s+way|\\bhalfway\\b|' +
+    '\\d{1,3}\\s*percent|\\b(?:first|second|third|fourth|fifth)\\s+(?:speed|setting|mode|level|gear)', 'i');
 
   var учили = !!(toyToldAt > 0 && D && D.state === 'on');
   var РЕЧЬ = /[«"“„]|(?:^|\s)[—–]\s/;
@@ -1953,7 +2119,7 @@ function deviceActOf(text){
     }
     var ord = ищем(DEV_ORD, фраза);
     for (j = 0; j < ord.length; j++){
-      var n = ORD_N[String(ord[j][1]).toLowerCase()];
+      var n = ORD_N[String(ord[j][1] || ord[j][2] || ord[j][3]).toLowerCase()];
       if (n){ уровень = clamp(Math.round(cap * n / 5), 1, cap); if (!акт) акт = 'вкл'; }
     }
     var pct = ищем(DEV_PCT, фраза);
@@ -2053,6 +2219,7 @@ function analystSys(){
     var t = passportText(p); return p.name + (t ? ' — ' + t : '');
   }).join('; ');
   var режиссёр = C.hintOn;
+  if (EN()) return analystSysEn(cap, caps, режиссёр);
   return 'Ты — управляющий модуль устройства в ролевой игре. Тебе дают последнее сообщение ' +
   'пользователя и ответ персонажа на него. Твоя работа: оценить, что происходит физически, и выдать программу ощущений' +
   (режиссёр ? ', а ещё одной фразой подсказать, куда вести следующий ответ' : '') + '.\n\n' +
@@ -2081,6 +2248,43 @@ function analystSys(){
     : '5. Никакого текста, кроме команд.');
 }
 
+function analystSysEn(cap, caps, режиссёр){
+  var extra = '';
+  if (caps.has('r')) extra += '<vibe:rotate="X" t="SEC"/> — rotation\n';
+  if (caps.has('s')) extra += '<vibe:suction="X" t="SEC"/> — suction\n';
+  if (caps.has('t')) extra += '<vibe:thrust="X" t="SEC"/> — thrusting, motion\n';
+  if (caps.has('p')) extra += '<vibe:pump="X" t="SEC"/> — inflation\n';
+  var паспорт = caps.kinds.map(function(p){
+    var t = passportText(p, true); return p.name + (t ? ' — ' + t : '');
+  }).join('; ');
+  return 'You are the control module of a device in a roleplay. You get the user\'s last message ' +
+  'and the character\'s reply to it. Your job: judge what is physically happening and output a sensation program' +
+  (режиссёр ? ', and in one sentence suggest where to take the next reply' : '') + '.\n\n' +
+  'Connected: ' + (паспорт || caps.names.join(', ') || 'a device') + '. It can do: ' + caps.briefEn + '.\n' +
+  'Use only these abilities — the device has nothing else.\n\n' +
+  'Reply ONLY with commands' + (режиссёр ? ' and one <hint> line' : '') + ', without a single word of explanation:\n' +
+  (caps.has('v') ? '<vibe:v="X" t="SEC"/> — steady vibration at strength X (0-' + cap + ')\n' : '') +
+  extra +
+  '<vibe:wave from="A" to="B" t="SEC"/> — smooth rise from A to B\n' +
+  '<vibe:pulse v="X" on="0.6" off="0.4" t="SEC"/> — pulsing\n' +
+  '<vibe:preset name="' + Object.keys(PRESETS).join('|') + '" t="SEC"/>\n' +
+  '<vibe:stop/> — silence\n\n' +
+  'Rules:\n' +
+  '1. If there is no physical intimacy or tension in the scene — reply exactly <vibe:stop/> and nothing else.\n' +
+  '2. Scale 0-' + cap + '. Light touches 3-6, warming up 7-11, explicit scene 12-' + cap + '.\n' +
+  '3. 2 to 4 commands, 25-50 seconds in total. The program should follow the shape of the scene: ' +
+  'a build-up with a build-up, a teasing pause with a drop to 0-2, a climax with a rise to the maximum.\n' +
+  '4. If the device has several abilities, use them as the scene suggests, not all at once.\n' +
+  (режиссёр
+    ? '5. Last line — <hint>…</hint>: one sentence in English for the narrator about where to take the next reply. ' +
+      'Look at what has already happened and suggest something different: change the pace, linger, pull back, change position or who leads, ' +
+      'weave in one of the preferences if given. If intimacy has only just begun, don\'t rush to the finish. ' +
+      'If the scene isn\'t intimate, leave <hint></hint> empty. No plugin names and no words like "the toy is controlled".' +
+      ((C.toyMode == null ? 1 : +C.toyMode) === 2 || toyInScene() ? '' : ' Don\'t suggest bringing toys or devices into the scene — there are none.') + '\n' +
+      '6. No text other than the commands and this line.'
+    : '5. No text other than the commands.');
+}
+
 // Что отдаём аналитику: твоё сообщение, ответ персонажа и предпочтения, если есть.
 function analystInput(plain){
   var мне = String(lastUserText || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(-500);
@@ -2090,6 +2294,23 @@ function analystInput(plain){
     if (her.length) пред.push(NAMES.char + ': ' + her.map(function(x){ return x.name; }).join(', '));
     if (mine.length) пред.push(кемЗовут() + ': ' + mine.map(function(x){ return x.name; }).join(', '));
   } catch(e){}
+  var en = EN();
+  if (en){
+    var пред2 = [];
+    try {
+      var her2 = charFetishes(), mine2 = ownFetishes();
+      if (her2.length) пред2.push(NAMES.char + ': ' + her2.map(function(x){ return fetName(x.name, true); }).join(', '));
+      if (mine2.length) пред2.push(кемЗовут() + ': ' + mine2.map(function(x){ return x.name; }).join(', '));
+    } catch(e){}
+    var сама2 = (моя && now() - моя.at < 10 * 60000)
+      ? 'The user set the toy herself in her message: ' +
+        (моя.level ? (моя.preset ? 'mode "' + моя.preset + '", ' : '') + моя.level + '/20' : 'switched it off') +
+        '. If the character didn\'t touch it, keep the program around this level (±3), not lower.\n\n'
+      : '';
+    return (мне ? 'User message:\n' + мне + '\n\n' : '') + сама2 +
+           'Character reply:\n' + plain +
+           (C.hintOn && пред2.length ? '\n\nPreferences — ' + пред2.join('; ') : '');
+  }
   var сама = (моя && now() - моя.at < 10 * 60000)
     ? 'Игрушку в своём сообщении выставила сама пользовательница: ' +
       (моя.level ? (моя.preset ? 'режим «' + моя.preset + '», ' : '') + моя.level + '/20' : 'выключила') +
@@ -2568,31 +2789,38 @@ function checkSafeword(text){
    напоминанием в промпт, третий — ещё и в ощущения. */
 
 var FET_DICT = [
-  { re: 'ше[яию]|горло|ключиц',           emoji: '🫦', name: 'Шея' },
-  { re: 'волос|локон|коса|хвост',          emoji: '💫', name: 'Волосы' },
-  { re: 'чулк|колготк|подвязк',            emoji: '🖤', name: 'Чулки' },
-  { re: 'бель[ёе]|кружев|лиф|комбинац',    emoji: '🎀', name: 'Бельё' },
-  { re: 'запах|аромат|духи',               emoji: '🌿', name: 'Запах' },
-  { re: 'голос|ш[ёе]пот|шепч',             emoji: '🎧', name: 'Голос' },
-  { re: 'укус|кусает|зуб',                 emoji: '🩸', name: 'Укусы' },
-  { re: 'царап|ногт',                      emoji: '💅', name: 'Царапины' },
-  { re: 'связыв|в[её]ревк|наручник|шибари', emoji: '🪢', name: 'Связывание' },
-  { re: 'подчин|покорн|слушаться',         emoji: '⛓️', name: 'Подчинение' },
-  { re: 'доминир|власт|приказ|командует',  emoji: '👑', name: 'Власть' },
-  { re: 'подгляд|наблюда|смотрит как',     emoji: '👁️', name: 'Взгляд' },
-  { re: 'зеркал',                          emoji: '🪞', name: 'Зеркала' },
-  { re: 'ладон|пальц|запяст',              emoji: '🤍', name: 'Руки' },
-  { re: 'стоп[аыу]|щиколот|босая',         emoji: '🦶', name: 'Ноги' },
-  { re: 'спин[аыу]|поясниц|лопатк',        emoji: '🌊', name: 'Спина' },
-  { re: 'форм[аыу]|мундир|униформ',        emoji: '🎖️', name: 'Форма' },
-  { re: 'кожан|латекс|винил',              emoji: '🧷', name: 'Латекс' },
-  { re: 'ш[ёе]лк|атлас',                   emoji: '🕊️', name: 'Шёлк' },
-  { re: 'вода|душ|ванн|дожд',              emoji: '💧', name: 'Вода' },
-  { re: 'на людях|публичн|застука|рискн',  emoji: '🚪', name: 'На людях' },
-  { re: 'дразн|медлен|томит|тянет',        emoji: '🕯️', name: 'Дразнение' },
-  { re: 'ж[ёе]стк|грубо|резк',             emoji: '🔥', name: 'Жёстко' },
-  { re: 'нежн|ласков|бережн|осторожн',     emoji: '🤍', name: 'Нежность' }
+  { re: 'ше[яию]|горло|ключиц|neck|throat|collarbone',           emoji: '🫦', name: 'Шея', en: 'Neck' },
+  { re: 'волос|локон|коса|хвост|hair\\b|curls|braid|ponytail',          emoji: '💫', name: 'Волосы', en: 'Hair' },
+  { re: 'чулк|колготк|подвязк|stocking|garter|pantyhose',            emoji: '🖤', name: 'Чулки', en: 'Stockings' },
+  { re: 'бель[ёе]|кружев|лиф|комбинац|lingerie|lace\\b|panties|\\bbra\\b',    emoji: '🎀', name: 'Бельё', en: 'Lingerie' },
+  { re: 'запах|аромат|духи|scent|perfume|fragrance',               emoji: '🌿', name: 'Запах', en: 'Scent' },
+  { re: 'голос|ш[ёе]пот|шепч|voice|whisper',             emoji: '🎧', name: 'Голос', en: 'Voice' },
+  { re: 'укус|кусает|зуб|\\bbit(?:e|es|ing)\\b|teeth',                 emoji: '🩸', name: 'Укусы', en: 'Biting' },
+  { re: 'царап|ногт|scratch|nails\\b',                      emoji: '💅', name: 'Царапины', en: 'Scratching' },
+  { re: 'связыв|в[её]ревк|наручник|шибари|bondage|tied up|rope|handcuff|shibari', emoji: '🪢', name: 'Связывание', en: 'Bondage' },
+  { re: 'подчин|покорн|слушаться|submissi|obey|obedien',         emoji: '⛓️', name: 'Подчинение', en: 'Submission' },
+  { re: 'доминир|власт|приказ|командует|dominan|in control|commanding',  emoji: '👑', name: 'Власть', en: 'Dominance' },
+  { re: 'подгляд|наблюда|смотрит как|voyeur|watch(?:es|ing) (?:her|him|you)',     emoji: '👁️', name: 'Взгляд', en: 'Gaze' },
+  { re: 'зеркал|mirror',                          emoji: '🪞', name: 'Зеркала', en: 'Mirrors' },
+  { re: 'ладон|пальц|запяст|fingertip|wrist',              emoji: '🤍', name: 'Руки', en: 'Hands' },
+  { re: 'стоп[аыу]|щиколот|босая|\\bfeet\\b|\\bfoot\\b|ankle|barefoot',         emoji: '🦶', name: 'Ноги', en: 'Feet' },
+  { re: 'спин[аыу]|поясниц|лопатк|lower back|shoulder blade|spine',        emoji: '🌊', name: 'Спина', en: 'Back' },
+  { re: 'форм[аыу]|мундир|униформ|uniform',        emoji: '🎖️', name: 'Форма', en: 'Uniform' },
+  { re: 'кожан|латекс|винил|leather|latex|vinyl',              emoji: '🧷', name: 'Латекс', en: 'Latex' },
+  { re: 'ш[ёе]лк|атлас|silk|satin',                   emoji: '🕊️', name: 'Шёлк', en: 'Silk' },
+  { re: 'вода|душ|ванн|дожд|shower|bathtub|\\bbath\\b|in the rain',              emoji: '💧', name: 'Вода', en: 'Water' },
+  { re: 'на людях|публичн|застука|рискн|in public|exhibition|getting caught',  emoji: '🚪', name: 'На людях', en: 'In public' },
+  { re: 'дразн|медлен|томит|тянет|teas(?:e|es|ing)\\b|edging',        emoji: '🕯️', name: 'Дразнение', en: 'Teasing' },
+  { re: 'ж[ёе]стк|грубо|резк|rough',             emoji: '🔥', name: 'Жёстко', en: 'Rough' },
+  { re: 'нежн|ласков|бережн|осторожн|gentle|tender',     emoji: '🤍', name: 'Нежность', en: 'Tenderness' }
 ];
+
+// Название предпочтения на языке подсказки. Свои, вписанные руками, — как вписаны.
+function fetName(n, en){
+  if (!en) return n;
+  for (var i = 0; i < FET_DICT.length; i++) if (FET_DICT[i].name === n) return FET_DICT[i].en || n;
+  return n;
+}
 
 // Имена для подписей: чей это персонаж и как зовут тебя в этом чате.
 var NAMES = { char: 'персонаж', user: 'ты' };
@@ -2735,7 +2963,13 @@ function fetishPrompt(){
   if (!her.length && !mine.length) return '';
   var горячо = F.at && (now() - F.at < 120000);
   if (!горячо && (genCount % Math.max(1, C.fetEvery)) !== 0) return '';
-  var names = function(a){ return a.map(function(x){ return x.name; }).join(', '); };
+  var en = EN();
+  var names = function(a){ return a.map(function(x){ return fetName(x.name, en); }).join(', '); };
+  if (en) return '[Preferences]\n' +
+    (her.length ? NAMES.char + ': ' + names(her) + '\n' : '') +
+    (mine.length ? кемЗовут() + ': ' + names(mine) + '\n' : '') +
+    'In intimate scenes, play on these: weave one detail into the action, don\'t list them ' +
+    'and don\'t call it a "fetish". One per reply, no more.';
   return '[Предпочтения]\n' +
     (her.length ? NAMES.char + ': ' + names(her) + '\n' : '') +
     (mine.length ? NAMES.user + ': ' + names(mine) + '\n' : '') +
@@ -3181,6 +3415,7 @@ function css(){
     '.pv-wz-list li,.pv-wz-steps li{margin-bottom:7px}',
     '.pv-wz-list b,.pv-wz-steps b{color:#e8b0b8}',
     '.pv-wz-note{font-size:11.5px;color:#b09aa3;line-height:1.5;margin-top:8px}',
+    '.pv-wz-warn{border-left:2px solid #d98a4a;padding:4px 0 4px 9px;color:#d8b8a8}',
     '.pv-wz-note b{color:#c8a0aa}',
     '.pv-wz-state{font-size:11.5px;color:#c8a0aa;margin-top:9px;padding:9px 10px;border-radius:11px;',
       'background:#151018;border:1px solid rgba(200,100,120,.2)}',
@@ -3750,6 +3985,9 @@ function buildWin(){
       '<div class="pv-swrow"><div class="pv-sw"><span>Не давать экрану гаснуть во время игры</span><div class="pv-tg" id="pv-tg-awake"><i></i></div></div><div class="pv-hint">погаснет экран — система усыпит ' + ХОСТ.имя + ', и игрушка замрёт на полуслове</div></div>' +
       '<div class="pv-swrow"><div class="pv-sw"><span>Не глушить игрушку, если ушла в другое приложение</span><div class="pv-tg" id="pv-tg-bg"><i></i></div></div><div class="pv-hint">ответила в Телеграме — игрушка держит уровень и доиграет, когда вернёшься. Выключишь — замолкает сразу</div></div>' +
       '<div class="pv-swrow"><div class="pv-sw"><span>Незаметная кнопка ≋</span><div class="pv-tg" id="pv-tg-dockdim"><i></i></div></div><div class="pv-hint">пока игрушка молчит, кнопка почти прозрачная и не мешает читать</div></div>' +
+        '<div class="pv-pick">язык пульта</div>' +
+        '<div class="pv-tabs" id="pv-lang"></div>' +
+        '<div class="pv-hint">«авто» — как язык ' + ХОСТ.родит + ', иначе как у телефона. Подсказки модели всегда идут на языке самой переписки</div>' +
         '<div class="pv-pick">размер шрифта в пульте</div>' +
         '<div class="pv-tabs" id="pv-fsize"></div>' +
         '<div class="pv-hint">для компьютера и Таверны. Окно тянется за уголок внизу справа и двигается за шапку; двойной щелчок по шапке возвращает его на место. Кнопка ≋ и окно сами не уходят за край экрана</div>' +
@@ -4346,6 +4584,14 @@ var WIZ_IMG = {
 /* На чём мы сейчас. Таво живёт на телефоне, но Intiface может стоять и на
    компьютере в той же Wi-Fi — тогда шаги другие. Платформу определяем, чтобы
    не заставлять читать инструкцию не от своего устройства. */
+/* На айфоне свои правила, и о них лучше знать до первой сцены. */
+var АЙФОН_ЗАМЕТКА =
+  '<div class="pv-wz-note pv-wz-warn" style="margin-top:10px"><b>На айфоне</b>' +
+  '<br>• Пока играешь, держи ' + ХОСТ.имя + ' на экране. Ушла в другое приложение — айфон замораживает ' + ХОСТ.имя +
+  ', и Intiface выключает игрушку. Вернёшься — плагин переподключится сам.' +
+  '<br>• Intiface 3.2 на айфоне сейчас роняет Satisfyer через пару минут — это ошибка самого Intiface. ' +
+  'Надёжнее запустить Intiface на компьютере в той же Wi-Fi и выбрать «на компьютере».</div>';
+
 function плат(){
   var ua = '';
   try { ua = String((pwin.navigator || navigator).userAgent || ''); } catch(e){}
@@ -4400,7 +4646,8 @@ var WIZ = [
         '<div class="pv-tabs" id="pv-wz-where"></div>' +
         '<div class="pv-wz-note" id="pv-wz-wherehint"></div>' +
         '<div class="pv-wz-note" style="margin-top:10px">Проще всего ' + этоУстройство() + ': адрес <b>127.0.0.1</b> ' +
-        'никуда не денется и не упрётся в запреты браузера. Другое устройство удобнее, если игрушка ловится там лучше.</div>';
+        'никуда не денется и не упрётся в запреты браузера. Другое устройство удобнее, если игрушка ловится там лучше.</div>' +
+        (плат() === 'ios' ? АЙФОН_ЗАМЕТКА : '');
     },
     после: function(){
       var box = el('pv-wz-where'); if (!box) return;
@@ -5151,6 +5398,7 @@ var ВЫБОРЫ = {
   denysec:[{ v: 1, t: 'секунда' }, { v: 2, t: 'две' }, { v: 3, t: 'три' }, { v: 5, t: 'пять' }],
   capown: [{ v: 0, t: 'как в настройках' }, { v: 8, t: 'до 8' }, { v: 12, t: 'до 12' }, { v: 16, t: 'до 16' }],
   toymode:[{ v: 0, t: 'нет' }, { v: 1, t: 'если в сцене' }, { v: 2, t: 'всегда' }],
+  lang:   [{ v: 'auto', t: 'авто' }, { v: 'ru', t: 'русский' }, { v: 'en', t: 'English' }],
   fsize:  [{ v: 0.9, t: 'мельче' }, { v: 1, t: 'обычный' }, { v: 1.15, t: 'крупнее' }, { v: 1.3, t: 'ещё крупнее' }],
   chaos:  [{ v: 0, t: 'ровно' }, { v: 15, t: 'чуть' }, { v: 40, t: 'заметно' }, { v: 75, t: 'своенравно' }],
   smooth: [{ v: 0, t: 'резко' }, { v: 35, t: 'мягко' }, { v: 70, t: 'очень мягко' }],
@@ -5229,6 +5477,8 @@ function paintPicks(){
   chipRow('pv-toymode','toymode',function(){ return C.toyMode == null ? 1 : +C.toyMode; },
     function(v){ C.toyMode = v; toyToldAt = 0; saveCfg(); buildPrompt(); paintToyMode(); });
   paintToyMode();
+  chipRow('pv-lang',   'lang',   function(){ return lsGet('pv_lang', null) || C.lang || 'auto'; },
+    function(v){ lsSet('pv_lang', v); C.lang = v; saveCfg(); I18N_CACHE = {}; i18nApply(); buildPrompt(); log('cfg', 'язык пульта: ' + (v === 'auto' ? 'авто → ' + uiLang() : v)); });
   chipRow('pv-fsize',  'fsize',  function(){ return fontScale(); },
     function(v){ lsSet('pv_winzoom', v); sizeWin(); placeWin(); });
 }
@@ -5520,7 +5770,7 @@ function paintPlay(){
 }
 
 function openWin(){
-  css(); buildWin();
+  css(); buildWin(); i18nApply();
   var w = el('pv-win');
   if (w){
     w.classList.add('on');
@@ -5689,6 +5939,910 @@ PV._msgs = function(){ var T = TV(); return T && T.message && T.message.find ? P
 PV.repaint = function(){ try { buildPrompt(); paintStatus(); } catch(e){} };
 PV.resetDock = function(){ try { resetDock(); } catch(e){} };
 
+/* ═══════════════ английский пульт ═══════════════ */
+/* Перевод — отдельный слой поверх готового экрана: логика и все подписи в коде
+   остаются русскими, а то, что видит человек, меняется по словарю. Так русский
+   пульт не трогается вовсе, а новая строка без перевода просто останется
+   русской, а не сломает кнопку. Промпты и «что уходит моделям» не переводим:
+   там должно быть видно ровно то, что ушло. */
+var EN_UI = {"На айфоне":"On iPhone",
+"• Пока играешь, держи Таво на экране. Ушла в другое приложение — айфон замораживает Таво, и Intiface выключает игрушку. Вернёшься — плагин переподключится сам.":"• Keep Tavo on screen while you play. Switch to another app and the iPhone freezes Tavo, so Intiface switches the toy off. Come back and the plugin reconnects by itself.",
+"• Intiface 3.2 на айфоне сейчас роняет Satisfyer через пару минут — это ошибка самого Intiface. Надёжнее запустить Intiface на компьютере в той же Wi-Fi и выбрать «на компьютере».":"• Intiface 3.2 on iPhone currently drops Satisfyer after a couple of minutes — a bug in Intiface itself. It's more reliable to run Intiface on a computer on the same Wi-Fi and choose “on a computer”.",
+"Bluetooth бьёт на пару метров, поэтому Intiface ставится на то устройство, что":"Bluetooth only reaches a couple of metres, so Intiface goes on the device that is",
+"нежно":"gentle",
+"мягко":"soft",
+"прибавить":"turn up",
+"убавить":"turn down",
+"повторить последнюю сцену":"repeat the last scene",
+"сцепить моторы":"link the motors",
+"слепой режим":"blind mode",
+"шёлк, шёпот, связывание":"silk, whispers, bondage",
+"потянуть — изменить размер, двойной щелчок — вернуть":"drag to resize, double-click to reset",
+"эндпоинт, напр. https://api.deepseek.com/v1":"endpoint, e.g. https://api.deepseek.com/v1",
+"модель, напр. deepseek-chat":"model, e.g. deepseek-chat",
+"ключ":"key",
+"Таверна":"SillyTavern",
+"в Таверне":"in SillyTavern",
+"Таверны":"SillyTavern",
+"в настройках расширения (Расширения → 📳 PUSYA VIBE)":"in the extension settings (Extensions → 📳 PUSYA VIBE)",
+"Открой в Таверне":"In SillyTavern, open",
+"Расширения":"Extensions",
+"(значок кубиков) →":"(the cubes icon) →",
+"текущее подключение Таверны":"SillyTavern's current connection",
+"Таво":"Tavo",
+"в Таво":"in Tavo",
+"в настройках плагина Таво":"in the Tavo plugin settings",
+"Открой в Таво":"In Tavo, open",
+"Ещё → Плагины → PUSYA VIBE":"More → Plugins → PUSYA VIBE",
+"встроенную модель Таво":"Tavo's built-in model",
+"стоп":"stop",
+"волна":"wave",
+"средне":"medium",
+"дразнилка":"tease",
+"жёстко":"hard",
+"обычно":"normal",
+"ровно":"steady",
+"настройки подхвачены из":"settings loaded from",
+"игра":"play",
+"Телефон — для проверки":"Phone — for testing",
+"вибромотор телефона":"phone vibration motor",
+"этот браузер не умеет navigator.vibrate":"this browser doesn't support navigator.vibrate",
+". Intiface пускает только одного: закрой пульт в других чатах и окнах":". Intiface accepts only one client: close the remote in other chats and windows",
+"Intiface — любой бренд":"Intiface — any brand",
+"адрес должен начинаться с ws:// или wss://":"the address must start with ws:// or wss://",
+"не открылся сокет:":"socket didn't open:",
+"подключаюсь…":"connecting…",
+"не ответил за 6 секунд — включён ли сервер в Intiface?":"no answer in 6 seconds — is the server running in Intiface?",
+"молчит 6 секунд":"silent for 6 seconds",
+"связи не было долго — сцену начинаю с тишины":"no connection for a long time — starting the scene from silence",
+": заряд":": battery",
+"% — скоро сядет":"% — running low",
+"почти разряжена (":"is almost flat (",
+"отвалилась от Intiface":"dropped from Intiface",
+", держалась":", lasted",
+"сек":"s",
+"— это Bluetooth, не наша связь":"— that's Bluetooth, not our connection",
+"соединение закрыто":"connection closed",
+"связь оборвалась":"connection lost",
+"— Таво был в фоне: телефон его заморозил, Intiface не дождался ответа и выключил игрушку.":"— Tavo was in the background: the phone froze it, Intiface got no reply and switched the toy off.",
+"Пока играешь, держи Таво на экране — Intiface в фоне работает, а Таво нет":"Keep Tavo on screen while you play — Intiface works in the background, Tavo doesn't",
+"(мы были на экране)":"(we were on screen)",
+"не достучалась до":"couldn't reach",
+"— запущен ли Intiface и тот ли адрес?":"— is Intiface running, and is the address right?",
+"нашлась игрушка:":"toy found:",
+"устройство":"device",
+"эта марка не любит частых команд — веду бережно":"this brand dislikes frequent commands — going gently",
+"Intiface не распознал модель Satisfyer — моторов может быть меньше, чем есть.":"Intiface didn't recognise the Satisfyer model — fewer motors than it really has may show.",
+"В Intiface: Devices → «Satisfyer Device» → Forget Device, выключи и включи игрушку и поищи заново":"In Intiface: Devices → “Satisfyer Device” → Forget Device, switch the toy off and on and scan again",
+"— это заглушка Intiface, отключила её":"— that's an Intiface placeholder, switched it off",
+"умеет:":"can:",
+"ничего — Intiface не нашёл у неё мотор":"nothing — Intiface found no motor on it",
+"игрушек не видно — нажми «Искать» в Intiface":"no toys visible — press “Scan” in Intiface",
+"проверяю…":"checking…",
+"подключено":"connected",
+"приложение отвечает, но игрушка не найдена":"the app answers, but no toy found",
+"игрушка найдена, но не подключена по Bluetooth":"toy found, but not connected over Bluetooth",
+"неожиданный ответ:":"unexpected reply:",
+"нет связи (":"no connection (",
+"). Включи Game Mode в Lovense Remote и проверь адрес/порт.":"). Turn on Game Mode in Lovense Remote and check the address/port.",
+"Свой вебхук / мост":"Custom webhook / bridge",
+"нужен полный адрес http(s)://…":"a full http(s)://… address is needed",
+"пока нечего повторять":"nothing to repeat yet",
+"сначала подключись":"connect first",
+"повторяю последнюю сцену":"repeating the last scene",
+"отказ на пике — тишина":"denial at the peak — silence",
+"автостоп:":"auto-stop:",
+"мин":"min",
+"отыграло — сцену снова ведёт персонаж":"finished — the character leads the scene again",
+"ответа нет дольше":"no reply for more than",
+"команды уходят:":"commands going out:",
+"тест: три толчка по":"test: three pulses at",
+"шесть":"six",
+"три":"three",
+"секунды":"seconds",
+"играет твой ритм — сцену не перебиваю, нажми СТОП":"your rhythm is playing — not interrupting it, press STOP",
+"стоп —":"stop —",
+"паника":"panic",
+"PUSYA VIBE: всё остановлено":"PUSYA VIBE: everything stopped",
+"ушли в фон — держу":"went to background — holding",
+"/20 до возвращения":"/20 until you're back",
+"пауза — сцена дождётся возвращения":"paused — the scene will wait for you",
+"подключилась сама:":"connected on its own:",
+"моста пока нет — попробую ещё пару раз":"no bridge yet — will try a couple more times",
+"в фоне дольше автостопа":"in the background longer than auto-stop",
+"продолжаю сцену":"continuing the scene",
+"вернулись через":"back after",
+"с":"s",
+"пульс":"pulse",
+"крещендо":"crescendo",
+"прибой":"surf",
+"сердцебиение":"heartbeat",
+"фейерверк":"fireworks",
+"тихо и ровно":"quiet & steady",
+"рябь":"ripple",
+"высокая рябь":"high ripple",
+"гребни":"crests",
+"частые гребни":"quick crests",
+"прилив":"tide",
+"отлив":"ebb",
+"нарастающий прилив":"rising tide",
+"цунами":"tsunami",
+"горки":"rollercoaster",
+"лесенка":"stairs",
+"молот":"hammer",
+"нырок":"dive",
+"вишенка":"cherry",
+"прыжок":"jump",
+"замок":"castle",
+"ча-ча-ча":"cha-cha-cha",
+"батут":"trampoline",
+"зайчик":"bunny",
+"разгон":"rush",
+"корона":"crown",
+"искра":"spark",
+"гром":"thunder",
+"большой взрыв":"big bang",
+"шалость":"mischief",
+"плавно вверх и плавно вниз, без пауз — ровное дыхание":"smoothly up and smoothly down, no pauses — even breathing",
+"короткие толчки: чуть больше полсекунды работы, полсекунды тишины":"short pulses: a bit over half a second on, half a second off",
+"один долгий подъём с самого низа до потолка, и всё":"one long rise from the very bottom to the ceiling, and that's it",
+"семь секунд накат до потолка, две секунды держит, секунда полной тишины":"seven seconds rolling up to the ceiling, holds two seconds, one second of full silence",
+"тук-тук — два коротких удара и пауза почти на секунду":"knock-knock — two short beats and a pause of almost a second",
+"рвано и случайно: каждый раз новая сила и новая длительность":"jagged and random: a new strength and length every time",
+"пять секунд вверх почти до потолка — и три секунды в ноль":"five seconds up almost to the ceiling — then three seconds at zero",
+"ровный тихий фон без изменений — для долгой игры":"an even, quiet background with no changes — for long play",
+"средняя сила, чуть покачивается вверх-вниз":"medium strength, rocking slightly up and down",
+"почти на потолке и чуть покачивается — держит, не отпуская":"near the ceiling, rocking slightly — holds without letting go",
+"острые пики: две секунды вверх, секунда вниз":"sharp peaks: two seconds up, one second down",
+"те же пики, но часто — по полсекунды":"the same peaks, but fast — half a second each",
+"большие мягкие волны, не опускаясь ниже середины":"big soft waves that never drop below the middle",
+"маленькие мягкие волны внизу шкалы — нежно":"small soft waves at the bottom of the scale — gentle",
+"четыре волны, каждая выше предыдущей":"four waves, each higher than the last",
+"восемь секунд накатывает, три держит на потолке — и две тишины":"eight seconds rolling in, three at the ceiling — and two of silence",
+"медленный подъём и резкий сброс вниз, снова и снова":"a slow climb and a sudden drop, again and again",
+"четыре ступени вверх по две с половиной секунды и короткая пауза":"four steps up, two and a half seconds each, and a short pause",
+"наоборот: удар сразу на полную и ступенями вниз":"the opposite: straight to full, then down in steps",
+"четыре секунды сильно — четыре секунды почти тишины":"four seconds strong — four seconds of near silence",
+"ровно и мягко, а посередине — один сладкий пик":"steady and soft, with one sweet peak in the middle",
+"разбег в два шага, короткий присед — и прыжок на полную":"a two-step run-up, a short crouch — and a jump to full",
+"зубцы стены по секунде: сильно — средне — сильно — почти тишина":"battlements, a second each: strong — medium — strong — near silence",
+"три коротких толчка и пауза — как танцевальный счёт":"three short pulses and a pause — like a dance count",
+"пружинит: держит высоко, короткий провал, снова вверх":"bouncy: holds high, a short dip, up again",
+"два быстрых подскока и пауза":"two quick hops and a pause",
+"толчки всё чаще и чаще, пока не сольются":"pulses faster and faster until they merge",
+"зубцы разной высоты — неровно, как корона":"peaks of different heights — uneven, like a crown",
+"тихий фон и внезапная короткая вспышка":"a quiet background and a sudden short flash",
+"затишье, удар, провал и второй удар":"a lull, a strike, a drop and a second strike",
+"долгий разгон, серия вспышек и полный выброс на потолке":"a long build-up, a burst of flashes and a full release at the ceiling",
+"беспорядочно прыгает по всей шкале — не угадать":"jumps all over the scale at random — impossible to guess",
+"паттерн":"pattern",
+"имя":"name",
+"ты":"you",
+"пользователь":"the user",
+"сейчас ничего — сцена спокойная или напоминать нечего":"nothing right now — the scene is calm or there's nothing to remind",
+"ничего: рубильник «Разрешить ИИ управлять» выключен":"nothing: the “Allow AI control” master switch is off",
+"ещё не спрашивала":"haven't asked yet",
+"вторая модель выключена — сцену ведут слова":"second model is off — words drive the scene",
+"основной — обновлено в":"main — updated at",
+"· второй — в":"· second — at",
+"вибрация":"vibration",
+"вращение":"rotation",
+"всасывание":"suction",
+"накачка":"inflation",
+"фрикции":"thrusting",
+"игрушка":"toy",
+"своё устройство":"custom device",
+"внешняя":"external",
+"внешняя, для клитора":"external, for the clitoris",
+"она":"her",
+"кролик":"rabbit",
+"внутрь и снаружи сразу (кролик)":"inside and outside at once (rabbit)",
+"внутренняя":"internal",
+"вводится внутрь":"inserted inside",
+"любой":"anyone",
+"пара":"couples",
+"для пары, носится во время близости":"for couples, worn during sex",
+"анальная":"anal",
+"анальная пробка":"anal plug",
+"простата":"prostate",
+"массажёр простаты":"prostate massager",
+"он":"him",
+"мастурбатор":"masturbator",
+"мастурбатор, надевается на член":"masturbator, worn on the penis",
+"кольцо":"ring",
+"эрекционное виброкольцо":"vibrating cock ring",
+"машина":"machine",
+"секс-машина, толкается сама":"sex machine, thrusts on its own",
+"соски":"nipples",
+"для сосков":"for nipples",
+"пуля":"bullet",
+"вибропуля или массажёр, куда приложишь":"bullet or wand, wherever you hold it",
+"с воздушной стимуляцией":"with air stimulation",
+"; сжимает воздушными камерами":"; squeezes with air chambers",
+"; вакуумно-волновая — стимулирует потоком воздуха, без прямого касания":"; air-pulse — stimulates with waves of air, no direct contact",
+"· заряд":"· battery",
+"вверх":"up",
+"вниз":"down",
+"ответ не-JSON — проверь адрес и ключ":"reply isn't JSON — check the address and key",
+"пустой ответ модели":"empty reply from the model",
+"аналитик не настроен: впиши эндпоинт, модель и ключ":"analyst isn't set up: enter the endpoint, model and key",
+"— сцену снова ведёт персонаж":"— the character leads the scene again",
+"играет твой ритм — сцену не разбираю":"your rhythm is playing — not reading the scene",
+"сцена спокойная":"calm scene",
+"по тексту ничего горячего — тишина":"nothing hot in the text — silence",
+"разбор по словам: накал":"reading by words: heat",
+"/20, совпадений":"/20, matches",
+"сцена спокойная — запрос не отправляла":"calm scene — request not sent",
+"читаю сцену…":"reading the scene…",
+"…жду ответ":"…waiting for the reply",
+"(пусто)":"(empty)",
+"режиссёр:":"director:",
+"аналитик не дал команд — оставляю как есть":"the analyst gave no commands — leaving as is",
+"аналитик: сцена спокойная":"analyst: calm scene",
+"сцена спокойная — тишина":"calm scene — silence",
+"программа на":"program of",
+"шаг(ов), старт с":"step(s), starting at",
+"аналитик:":"analyst:",
+"подстраховка: разобрала сама, по словам":"fallback: read it myself, by words",
+"в сцене выключил игрушку — тишина":"the toy was switched off in the scene — silence",
+"в сцене включил режим «":"in the scene, mode switched to “",
+"» на":"” at",
+"в сцене":"in the scene",
+"прибавил":"turned up",
+"убавил":"turned down",
+"включил":"turned on",
+"команда «":"command “",
+"в сцене игрушку выключили":"the toy was switched off in the scene",
+"в сцене игрушка играет «":"in the scene the toy plays “",
+"/20 — так и оставляю до ответа":"/20 — keeping it until the reply",
+"в сцене игрушку оставили на":"in the scene the toy was left at",
+"/20 — так и держу до ответа":"/20 — holding it until the reply",
+"ответ спокойный — игрушка стоит, как ты её выставила":"calm reply — the toy stays where you set it",
+"ответ прочитан: сцена спокойная — игрушку не трогаю":"reply read: calm scene — leaving the toy alone",
+"тегов нет — веду сцену по словам":"no tags — following the scene by words",
+"ты в сцене выключила игрушку":"you switched the toy off in the scene",
+"по твоему сообщению —":"from your message —",
+"игрушка на":"toy at",
+"пишешь сама":"you're typing",
+"ты отправила сообщение":"you sent a message",
+"отклик на твоё сообщение":"response to your message",
+"пошёл новый ответ":"a new reply started",
+"ответ переписывается":"the reply is being rewritten",
+"ответ переписывается — начинаю сцену заново":"the reply is being rewritten — restarting the scene",
+"команд":"commands",
+"из ответа →":"from the reply →",
+"стоп-слово «":"safeword “",
+"стоп-слово в сообщении — управление выключено":"safeword in the message — control switched off",
+"Шея":"Neck",
+"Волосы":"Hair",
+"Чулки":"Stockings",
+"Бельё":"Lingerie",
+"Запах":"Scent",
+"Голос":"Voice",
+"Укусы":"Biting",
+"Царапины":"Scratching",
+"Связывание":"Bondage",
+"Подчинение":"Submission",
+"Власть":"Dominance",
+"Взгляд":"Gaze",
+"Зеркала":"Mirrors",
+"Руки":"Hands",
+"Ноги":"Feet",
+"Спина":"Back",
+"Форма":"Uniform",
+"Латекс":"Latex",
+"Шёлк":"Silk",
+"Вода":"Water",
+"На людях":"In public",
+"Дразнение":"Teasing",
+"Жёстко":"Rough",
+"Нежность":"Tenderness",
+"персонаж":"character",
+"из карточки:":"from the card:",
+"фетиш сработал на":"fetish triggered at",
+"/5 → всплеск до":"/5 → burst up to",
+"тишина":"silence",
+"добавь хотя бы один кусок":"add at least one piece",
+"первая дорожка пустая":"the first track is empty",
+"нечего играть":"nothing to play",
+"своя программа ·":"custom program ·",
+"по кругу":"on loop",
+", один раз":", once",
+"м":"min",
+"мотор":"motor",
+"программа":"program",
+"куск. ·":"pcs ·",
+"пусто":"empty",
+"выбери ниже «мотор":"pick “motor",
+"» и добавляй рисунки":"” below and add patterns",
+"нажимай рисунки ниже — они встанут сюда":"tap patterns below — they'll land here",
+"у игрушки один мотор — вторая дорожка сохранена и заиграет на двухмоторной":"the toy has one motor — the second track is saved and will play on a two-motor toy",
+"добавить на":"add to",
+"мотор 1":"motor 1",
+"мотор 2":"motor 2",
+"добавить рисунок":"add a pattern",
+"нажми кусок на дорожке — выберешь силу и время":"tap a piece on the track to choose strength and time",
+"· мотор":"· motor",
+"сила":"strength",
+"сколько":"how long",
+"убрать кусок":"remove piece",
+"на дорожке уже двенадцать кусков":"the track already has twelve pieces",
+"сохранённые":"saved",
+"загружено:":"loaded:",
+"сохранять пока нечего":"nothing to save yet",
+"программа сохранена":"program saved",
+"долгое нажатие":"long press",
+"СТОП":"STOP",
+"кнопка рядом с ≋":"button next to ≋",
+"кнопка ≋ вернулась на место":"the ≋ button is back in place",
+"нет игрушки":"no toy",
+"не подключено":"not connected",
+"Характер":"Style",
+"🎭 Общий тон одним касанием. Ниже — то же самое по отдельности, если хочется точнее.":"🎭 The overall tone in one tap. Below — the same thing piece by piece, if you want it precise.",
+"Как играть сцену":"How to play the scene",
+"мой потолок силы":"my strength ceiling",
+"выше этого плагин не поднимется, что бы ни придумала модель. Ниже общего потолка из настроек":"the plugin won't go above this, whatever the model comes up with. Below the general ceiling from the settings",
+"— можно, выше — нет":"— allowed, above — not",
+"сила сцены":"scene strength",
+"насколько сильнее или мягче играть то, что придумала сцена. Твои волны и готовые рисунки это не трогает":"how much stronger or softer to play what the scene came up with. Doesn't affect your waves and ready patterns",
+"отказ на пике":"denial at the peak",
+"вместо максимума — тишина, потом возвращение вполсилы":"silence instead of the maximum, then back at half strength",
+"длина отказа":"denial length",
+"сколько держать тишину. Секунда дразнит, пять — сбивает настрой":"how long the silence lasts. One second teases, five breaks the mood",
+"своеволие":"wilfulness",
+"иногда сильнее, чем просили, иногда внезапная заминка":"sometimes stronger than asked, sometimes a sudden hitch",
+"переходы":"transitions",
+"резко — уровень прыгает сразу, мягко — доезжает за секунду":"sharp — the level jumps at once, soft — it glides there in a second",
+"в паузах":"in pauses",
+"играть нечего — тишина, ровный фон или волна: она медленно ходит вверх-вниз, и её слышно даже в долгой паузе. Держится и между ответами":"nothing to play — silence, a steady background or a wave: it slowly moves up and down and you feel it even in a long pause. Stays on between replies too",
+"Последние 1,5 минуты":"Last 1.5 minutes",
+"тихо":"quiet",
+"идёт":"running",
+"средний":"average",
+"пик":"peak",
+"Что играло":"What played",
+"🎵 Дорожка игры: паттерны, своя программа, волны и что плагин услышал в сцене.":"🎵 The play track: patterns, custom program, waves and what the plugin heard in the scene.",
+"↺ Перечитать последний ответ":"↺ Re-read the last reply",
+"модель оборвала пост или ты вела сама — плагин заново разберёт ответ, и сцену снова ведёт персонаж":"the model cut its post short or you were leading — the plugin reads the reply again and the character leads the scene",
+"Готовые рисунки":"Ready patterns",
+"▶ Нажала — играет. Что почувствуешь, написано под сеткой.":"▶ Tap it — it plays. What you'll feel is written under the grid.",
+"Сколько играть":"How long to play",
+"1 мин":"1 min",
+"Играть по кругу":"Play on loop",
+"Своя программа":"Custom program",
+"🎛 Из тех же рисунков, у двух моторов — каждому свой: например, первому цунами, второму горки.":"🎛 Built from the same patterns; with two motors each gets its own: say, tsunami on the first, rollercoaster on the second.",
+"▶ Играть":"▶ Play",
+"✎ Собрать":"✎ Build",
+"поделиться кодом":"share as a code",
+"Своя программа — коротким кодом. Подруга вставит и получит то же.":"Your custom program as a short code. A friend pastes it and gets the same.",
+"Копировать свой":"Copy mine",
+"Вставить чужой":"Paste one",
+"🔥 Предпочтения":"🔥 Preferences",
+"🔥 Что заводит его и тебя. Плагин ищет это в тексте и отзывается.":"🔥 What turns them and you on. The plugin looks for it in the text and responds.",
+"Из карточки":"From the card",
+"Из чата":"From the chat",
+"Подсказывать модели":"Remind the model",
+"тихо просит вплетать эти детали в текст — не списком, по одной за ответ. Это про прозу, игрушки не касается":"quietly asks to weave these details into the text — not as a list, one per reply. It's about the prose, not the toy",
+"Поддавать, когда сработало":"Boost when it comes up",
+"в сцене мелькнули чулки или он прикусил шею — игрушка на пару секунд усилится поверх того, что играет, и вернётся обратно":"stockings flashed in the scene or he bit her neck — the toy boosts for a couple of seconds over what's playing, then goes back",
+"Игрушка":"Toy",
+"🔌 Связь с устройством. Настраивается один раз.":"🔌 Connection to the device. Set up once.",
+"Подключить":"Connect",
+"Тест":"Test",
+"Подключаться сама":"Connect automatically",
+"цепляется при открытии чата и после обрыва":"connects when a chat opens and after a drop",
+"другой адрес или способ связи":"another address or connection type",
+"Настройка заново":"Setup again",
+"Экскурсия по панели":"Panel tour",
+"первое — окошки про Intiface, второе — указатели по кнопкам":"the first — Intiface setup windows, the second — pointers to the buttons",
+"Кто ведёт сцену":"Who drives the scene",
+"🧠 Кто решает, насколько сильно вибрировать: сам плагин по тексту или отдельная модель.":"🧠 Who decides how strong to vibrate: the plugin itself from the text, or a separate model.",
+"Слушаться персонажа":"Obey the character",
+"сказал «сильнее» — станет сильнее, «замри» — тишина. А если в сцене он берёт игрушку и включает её на максимум — включится настоящая":"says “harder” — it gets stronger, “freeze” — silence. And if in the scene he picks up the toy and turns it to max, the real one turns on",
+"Не торопить сцену":"Don't rush the scene",
+"просит модель вести близость ступенями и не сводить её к трём строчкам":"asks the model to build intimacy in stages and not squeeze it into three lines",
+"персонаж знает об игрушке":"the character knows about the toy",
+"что уходит моделям":"what goes to the models",
+"основной модели — перед каждым ответом":"to the main model — before each reply",
+"второй модели — последний запрос (твоё сообщение и ответ персонажа)":"to the second model — the last request (your message and the character's reply)",
+"её ответ":"its reply",
+"Как вести себя":"Behaviour",
+"Отпустила волну — в ноль":"Let go of the wave — to zero",
+"выключено — мотор держит силу, на которой ты его оставила":"off — the motor holds the strength you left it at",
+"Отклик на мои сообщения":"Respond to my messages",
+"короткая вставка, пока модель думает":"a short burst while the model thinks",
+"Повторять сцену до ответа":"Repeat the scene until the reply",
+"программа от модели играет по кругу, пока не придёт следующий ответ":"the model's program loops until the next reply arrives",
+"Глушить, когда пишу я":"Mute while I type",
+"начала печатать — игрушка замолкает":"start typing — the toy goes quiet",
+"Запомнить для этого чата":"Remember for this chat",
+"с одним персонажем жёстче, с другим нежнее":"rougher with one character, gentler with another",
+"Экран и окно":"Screen and window",
+"Не давать экрану гаснуть во время игры":"Keep the screen on while playing",
+"погаснет экран — система усыпит":"if the screen goes off, the system puts",
+", и игрушка замрёт на полуслове":"to sleep and the toy stops mid-word",
+"Не глушить игрушку, если ушла в другое приложение":"Don't mute the toy when I switch apps",
+"ответила в Телеграме — игрушка держит уровень и доиграет, когда вернёшься. Выключишь — замолкает сразу":"replied in Telegram — the toy holds its level and finishes when you're back. Turn it off — it goes quiet at once",
+"Незаметная кнопка ≋":"Subtle ≋ button",
+"пока игрушка молчит, кнопка почти прозрачная и не мешает читать":"while the toy is silent, the button is almost transparent and doesn't get in the way",
+"размер шрифта в пульте":"font size in the panel",
+"для компьютера и Таверны. Окно тянется за уголок внизу справа и двигается за шапку; двойной щелчок по шапке возвращает его на место. Кнопка ≋ и окно сами не уходят за край экрана":"for desktop and SillyTavern. Resize the window by the bottom-right corner and move it by the header; double-click the header to put it back. The ≋ button and the window never leave the screen",
+"Что происходило":"Event log",
+"📋 Связь, ошибки, заряд. Игра здесь отмечена одной строкой — подробно она в «Сейчас».":"📋 Connection, errors, battery. Play is marked here as one line — the details are in the panel.",
+"Пульт":"Panel",
+"Играть":"Play",
+"Хочу":"Desires",
+"Настройки":"Settings",
+"Сохранить":"Save",
+"Очистить":"Clear",
+"Готово":"Done",
+"Пуся · t.me/pusgir":"Pusya · t.me/pusgir",
+"кнопка":"button",
+"моторы сцеплены — двигаются вместе":"motors linked — move together",
+"моторы раздельно":"motors separate",
+"Переподключить":"Reconnect",
+"подключено:":"connected:",
+"не вышло:":"failed:",
+"PUSYA VIBE: устройство на связи":"PUSYA VIBE: device connected",
+"PUSYA VIBE: не подключилось":"PUSYA VIBE: couldn't connect",
+"включи «Разрешить ИИ управлять» в настройках плагина":"turn on “Allow AI control” in the plugin settings",
+"ищу игрушку…":"looking for the toy…",
+"ИИ отключён":"AI switched off",
+"настройки закреплены за этим чатом":"settings pinned to this chat",
+"вслепую: цифры спрятаны":"blind: numbers hidden",
+"снова видно":"visible again",
+"сначала собери программу":"build a program first",
+"код скопирован":"code copied",
+"код в поле — скопируй вручную":"the code is in the field — copy it by hand",
+"программа из кода:":"program from code:",
+"куск.":"pcs",
+"программа подставлена":"program loaded",
+"код не понят — он выглядит как PV2-w2x60.d3x30":"code not understood — it looks like PV2-w2x60.d3x30",
+"паттерн «":"pattern “",
+"один раз":"once",
+"дразнить":"tease",
+"профиль «":"profile “",
+"общий":"shared",
+"настройки этого чата подхвачены":"this chat's settings loaded",
+"запоминаю для:":"remembering for:",
+"с одним персонажем можно жёстче, с другим нежнее":"you can be rougher with one character and gentler with another",
+"тихо и плавно, до сильного почти не доходит":"quiet and smooth, hardly ever gets strong",
+"идёт за сценой: касания — тихо, разгар — сильнее, пик — на полную":"follows the scene: touches — quiet, heat — stronger, peak — full",
+"сразу с середины, на пике на полную, обрывы резкие":"starts in the middle, full at the peak, sharp cut-offs",
+"доводит почти до предела и роняет в ноль — привыкнуть не даёт":"takes you almost to the edge and drops to zero — never lets you get used to it",
+"⚠ рубильник выключен":"⚠ master switch is off",
+"Выключено «Разрешить ИИ управлять» — оно":"“Allow AI control” is off — it's",
+". Пока так, игрушка молчит, что бы тут ни стояло.":". Until then, the toy stays silent whatever is set here.",
+"🔌 игрушка не подключена":"🔌 toy not connected",
+"Нажми, чтобы открыть подключение.":"Tap to open the connection.",
+"⏸ персонаж не ведёт игрушку":"⏸ the character isn't driving the toy",
+"Тумблер «персонаж» наверху выключен — игрушка слушается только тебя.":"The “character” toggle at the top is off — the toy only listens to you.",
+"Главный тумблер":"Main toggle",
+"Включён — игрушку ведёт персонаж: плагин читает сцену и крутит её сам. Выключен — она слушается только тебя.":"On — the character drives the toy: the plugin reads the scene and runs it. Off — it only listens to you.",
+"СТОП и сила":"STOP and strength",
+"СТОП гасит всё мгновенно и с любого экрана. Рядом волны: тянешь вверх — сильнее, «+» и «−» — ровно на деление, ↻ — повторить последнюю сцену.":"STOP kills everything instantly from any screen. Next to it are the waves: drag up for stronger, “+” and “−” move one step, ↻ repeats the last scene.",
+"Разделы":"Sections",
+"Пульт, рисунки, предпочтения и настройки — одним касанием, без возврата в меню. Пульт наверху остаётся на месте всегда.":"Panel, patterns, preferences and settings — one tap, no going back to a menu. The controls at the top always stay in place.",
+"Если что-то мешает":"If something's in the way",
+"Здесь появится причина, по которой игрушка молчит, — и по плашке можно нажать, чтобы попасть туда, где чинится.":"The reason the toy is silent shows up here — tap the banner to go where it's fixed.",
+"Общий тон игры одним касанием. Ниже — то же самое по отдельности: потолок, сила сцены, отказ на пике, что делать в паузах.":"The overall tone in one tap. Below — the same thing piece by piece: ceiling, scene strength, denial at the peak, what to do in pauses.",
+"Как идёт сцена":"How the scene is going",
+"Последние полторы минуты одним взглядом, а ниже — что играло и что плагин услышал в сцене.":"The last minute and a half at a glance, and below — what played and what the plugin heard in the scene.",
+"Нажала — играет он, персонаж не вмешивается. Видно два ряда — последние, что играли; остальные по кнопке под сеткой.":"Tap one — it plays and the character stays out of it. Two rows are shown — the latest you played; the rest are behind the button under the grid.",
+"Здесь видно, что в ней лежит. «Собрать» открывает панельку: у двух моторов каждому свой рисунок — например, первому цунами, второму горки.":"Here you see what's in it. “Build” opens a small panel: with two motors, each gets its own pattern — say, tsunami on the first, rollercoaster on the second.",
+"Что заводит":"What turns you on",
+"Сверху — персонажа: из карточки или из чата. Ниже — твои, через запятую. Лишнее убирается крестиком.":"At the top — the character's: from the card or from the chat. Below — yours, separated by commas. Remove any with the cross.",
+"Подключить, проверить, выбрать, какие участвуют. Здесь же пройти настройку и эту экскурсию заново.":"Connect, test, choose which toys take part. You can also redo the setup and this tour here.",
+"Плагин сам по словам в тексте или отдельная модель. Ниже — слушаться ли команд персонажа и просить ли модель не комкать сцену.":"The plugin itself, by words in the text, or a separate model. Below — whether to obey the character's commands and ask the model not to rush the scene.",
+"Связь, ошибки, заряд — ошибки подсвечены красным. Потолок, автостоп и стоп-слово —":"Connection, errors, battery — errors are highlighted in red. Ceiling, auto-stop and safeword —",
+"Предпочтения":"Preferences",
+"всё, дальше сама":"that's it, you take it from here",
+"из":"of",
+"Назад":"Back",
+"Понятно":"Got it",
+"Дальше":"Next",
+"иное":"other",
+"на этом айфоне":"on this iPhone",
+"на этом андроиде":"on this Android",
+"на этом компьютере":"on this computer",
+"здесь же, где":"right here, where",
+"свой адрес":"custom address",
+"Что понадобится":"What you'll need",
+"Настроим один раз — дальше плагин цепляется сам.":"We set it up once — after that the plugin connects on its own.",
+"Игрушка с Bluetooth.":"A Bluetooth toy.",
+"Почти любая: Satisfyer, We-Vibe, Lovense, Kiiroo и ещё сотня.":"Almost any: Satisfyer, We-Vibe, Lovense, Kiiroo and a hundred more.",
+"— бесплатное приложение. Есть в App Store, Google Play и для компьютера (Windows, Mac, Linux). Оно говорит с игрушкой по Bluetooth, плагин сам этого не умеет.":"— a free app. It's on the App Store, Google Play and for computers (Windows, Mac, Linux). It talks to the toy over Bluetooth; the plugin can't do that itself.",
+"intiface.com — выбери своё устройство":"intiface.com — pick your device",
+"Нет игрушки под рукой? Можно пройти позже — плагин напомнит.":"No toy at hand? You can do this later — the plugin will remind you.",
+"Где будет Intiface":"Where Intiface will run",
+"Bluetooth бьёт на пару метров, поэтому Intiface ставится на то устройство,":"Bluetooth only reaches a couple of metres, so Intiface goes on the device",
+"что":"that is",
+"физически рядом с игрушкой":"physically next to the toy",
+". Выбери, где он будет жить.":". Choose where it will live.",
+"Проще всего":"Easiest",
+": адрес":": the address",
+"никуда не денется и не упрётся в запреты браузера. Другое устройство удобнее, если игрушка ловится там лучше.":"won't go anywhere and won't hit browser restrictions. Another device is handier if the toy connects better there.",
+"на другом устройстве":"on another device",
+"на компьютере":"on a computer",
+"оба устройства должны быть в одной Wi-Fi":"both devices must be on the same Wi-Fi",
+"самый простой путь — ничего настраивать в сети не нужно":"the simplest way — no network setup needed",
+"Запусти движок":"Start the engine",
+"Открой Intiface Central":"Open Intiface Central",
+"на том устройстве":"on that device",
+"и нажми большую":"and press the big",
+"вот эта ▶ — после нажатия статус станет Engine running":"this ▶ — after pressing it the status becomes Engine running",
+"Чтобы":"For",
+"вообще":"to be able",
+"смогла":"",
+"смог":"",
+"достучаться, в настройках Intiface включи":"to reach it, turn on in the Intiface settings",
+"— по умолчанию он слушает только сам себя.":"— by default it only listens to itself.",
+"настройки Intiface":"Intiface settings",
+"Там же посмотри":"Also check",
+"порт":"the port",
+"(обычно 12345) и узнай":"(usually 12345) and find",
+"IP этого устройства":"this device's IP",
+"в локальной сети —":"on the local network —",
+"он понадобится через шаг.":"you'll need it in the next step.",
+"На компьютере разрешения спрашивать не нужно — достаточно, чтобы в системе был включён Bluetooth.":"A computer doesn't ask for permissions — Bluetooth just needs to be on in the system.",
+"Не срабатывает или статус сразу падает обратно — значит, приложению не дали разрешений.":"Doesn't work, or the status drops right back — the app wasn't given permissions.",
+"Настройки → Приложения → Intiface → Разрешения":"Settings → Apps → Intiface → Permissions",
+"На андроиде нужны":"On Android you need",
+"«Устройства поблизости»":"“Nearby devices”",
+"и":"and",
+"«Местоположение»":"“Location”",
+"Второе выглядит странно, но без него система не даёт искать Bluetooth-устройства — это правило самого андроида, не Intiface.":"The second looks odd, but without it the system won't let apps look for Bluetooth devices — that's Android's own rule, not Intiface's.",
+"Настройки → Intiface → Bluetooth и Локальная сеть":"Settings → Intiface → Bluetooth and Local Network",
+"На айфоне нужны":"On iPhone you need",
+"Локальная сеть":"Local Network",
+"Обоих нет в списке? Нажми ▶ ещё раз — система спросит сама.":"Neither is in the list? Press ▶ again — the system will ask.",
+"Найди игрушку":"Find the toy",
+"Включи игрушку и":"Switch the toy on and",
+"полностью закрой её родное приложение":"fully close its own brand app",
+"она слушается только одного хозяина. Потом в Intiface:":"it obeys only one owner. Then in Intiface:",
+"так должно быть: Engine running, у игрушки зелёный значок Bluetooth":"this is how it should look: Engine running, a green Bluetooth icon next to the toy",
+"— исключение: его нужно сначала спарить в системном Bluetooth":"— the exception: pair it first in the system Bluetooth",
+"того устройства, где стоит Intiface. Остальные бренды, наоборот, парить не надо.":"of the device running Intiface. Other brands, on the contrary, need no pairing.",
+"Satisfyer в системном Bluetooth — только для него":"Satisfyer in the system Bluetooth — only for it",
+"Satisfyer виден, но не подключается":"Satisfyer is visible but won't connect",
+"Отвяжи его от прежнего хозяина.":"Unlink it from its previous owner.",
+"Satisfyer помнит только одно устройство.":"A Satisfyer remembers only one device.",
+"Закрой Intiface и Satisfyer Connect на телефоне, а в его Bluetooth нажми «Забыть это устройство».":"Close Intiface and Satisfyer Connect on the phone, and in its Bluetooth tap “Forget this device”.",
+"Сбрось игрушку:":"Reset the toy:",
+"зажми кнопку сброса из инструкции на 10 секунд. Сброс прошёл, если она дала":"hold the reset button from the manual for 10 seconds. The reset worked if it gave",
+"3 вибрации, а потом 5 быстрых импульсов":"3 vibrations, then 5 quick pulses",
+"Windows 11 прячет её в списке.":"Windows 11 hides it in the list.",
+"Параметры → Bluetooth и устройства → Устройства →":"Settings → Bluetooth & devices → Devices →",
+"«Обнаружение устройств Bluetooth» →":"“Bluetooth devices discovery” →",
+"«Расширенный»":"“Advanced”",
+". Потом «Добавить устройство» — она будет называться":". Then “Add device” — it will be called",
+"или «Неизвестное устройство».":"or “Unknown device”.",
+"В логе Intiface это выглядит как «found» и сразу за ним «NotConnected» по кругу.":"In the Intiface log it shows as “found” followed right away by “NotConnected”, over and over.",
+"Отдельный Bluetooth-донгл нужен, только если после всех трёх шагов не помогло.":"A separate Bluetooth dongle is only needed if all three steps didn't help.",
+"Если игрушки нет в списке у самого Intiface — идти дальше бессмысленно: плагин видит ровно то же.":"If the toy isn't in Intiface's own list, there's no point going further: the plugin sees exactly the same.",
+"Свяжемся с ней":"Let's connect to it",
+"✓ подключено:":"✓ connected:",
+"не вышло":"failed",
+"ещё не пробовали":"not tried yet",
+"Теперь пусть плагин найдёт Intiface.":"Now let the plugin find Intiface.",
+"адрес:":"address:",
+"Другой адрес или способ связи":"Another address or connection type",
+"Intiface на компьютере — впиши":"Intiface on a computer — enter",
+"ws://IP-компьютера:12345":"ws://computer-IP:12345",
+"через «другой адрес».":"via “another address”.",
+"IP виден в самом Intiface или в настройках сети компьютера.":"The IP is shown in Intiface itself or in the computer's network settings.",
+"Если":"If",
+"открыта":"is open",
+"открыт":"is open",
+"по https, браузер может не пустить незащищённый":"over https, the browser may block an insecure",
+"на чужой адрес.":"to another address.",
+"Тогда включи в Intiface":"Then turn on in Intiface",
+"и пиши":"and enter",
+"Intiface на этом же телефоне — оставляй":"Intiface on this same phone — keep",
+". Так надёжнее:":". It's more reliable:",
+"адрес не слетает при смене Wi-Fi и не упирается в запреты браузера.":"the address doesn't break when Wi-Fi changes and doesn't hit browser restrictions.",
+"сначала подключись — или пропусти шаг":"connect first — or skip the step",
+"Проверим":"Let's test",
+"Короткий тест: игрушка должна плавно раскрутиться и затихнуть.":"A short test: the toy should spin up smoothly and go quiet.",
+"Проверить — три толчка":"Test — three pulses",
+"Тихо? Потяни ползунок в самом Intiface. Не вибрирует и там — дело в игрушке: заряд, сон или родное приложение всё ещё держит её.":"Silent? Drag the slider in Intiface itself. If it doesn't vibrate there either, it's the toy: battery, sleep, or the brand app still holds it.",
+"Главный рубильник":"Master switch",
+"Последняя обязательная вещь, и она":"The last required thing, and it's",
+"снаружи панели":"outside the panel",
+"✓ рубильник включён — всё готово":"✓ master switch is on — all set",
+"⚠ пока выключен — игрушка будет молчать":"⚠ still off — the toy will stay silent",
+"Включи":"Turn on",
+"«Разрешить ИИ управлять»":"“Allow AI control”",
+"Там же стоят границы:":"The limits are there too:",
+"потолок интенсивности":"intensity ceiling",
+"автостоп":"auto-stop",
+"стоп-слово":"safeword",
+". Загляни, поставь по себе.":". Take a look and set them to suit you.",
+"В настройках PUSYA VIBE это самый первый переключатель, сразу под строкой про кнопку ≋.":"In the PUSYA VIBE settings it's the very first toggle, right under the line about the ≋ button.",
+"Нажми на него — он станет цветным.":"Tap it — it turns coloured.",
+"Это сделано нарочно: то, что останавливает игрушку, живёт":"This is on purpose: what stops the toy lives",
+", а не в панели — чтобы случайно не сдвинуть в процессе.":", not in the panel — so it can't be moved by accident mid-play.",
+"Осталось выбрать характер — всё остальное встанет само.":"Just pick a style — everything else sets itself.",
+"Дальше просто играй: плагин читает сцену сам,":"From here just play: the plugin reads the scene itself,",
+"ни тегов, ни правок в пресете не нужно.":"no tags and no preset edits needed.",
+"Показать саму панель":"Show the panel",
+"экскурсия по всем разделам:":"a tour of all sections:",
+"указателей по настоящим кнопкам":"pointers to the real buttons",
+"шаг":"step",
+"Пропустить настройку":"Skip setup",
+"ещё не готово":"not ready yet",
+"настройка пройдена":"setup complete",
+"По словам — на лету":"By words — live",
+"Отдельная модель":"Separate model",
+"нет доступа к сообщениям":"no access to messages",
+"в чате нет ответа персонажа":"no character reply in the chat",
+"перечитываю ответ":"re-reading the reply",
+"не вышло прочитать чат":"couldn't read the chat",
+"Плагин читает ответ прямо во время печати и отзывается на то, что только что появилось.":"The plugin reads the reply as it's being typed and responds to what just appeared.",
+"Ничего не просит у основной модели: ни лишних токенов, ни правок в пресете.":"It asks nothing of the main model: no extra tokens, no preset edits.",
+"По каким словам считаю":"Which words I count",
+"тихо · до 6":"quiet · up to 6",
+"касания, шёпот, поцелуи, мурашки":"touches, whispers, kisses, goosebumps",
+"средне · до 11":"medium · up to 11",
+"стоны, дрожь, бёдра, пальцы":"moans, trembling, thighs, fingers",
+"пик · до 17":"peak · up to 17",
+"глубже, быстрее, содрогается, оргазм":"deeper, faster, shuddering, orgasm",
+"Отзываться по ходу печати":"Respond while it's typing",
+"выключишь — сцена соберётся один раз, когда ответ дописан":"turn it off — the scene is built once, when the reply is finished",
+"Разобрать последний ответ":"Read the last reply",
+"Отдельный тихий запрос читает готовый ответ и строит программу. Проза остаётся чистой, тегов в тексте нет.":"A separate quiet request reads the finished reply and builds a program. The prose stays clean, no tags in the text.",
+"Разобрать ответ":"Read the reply",
+"Проверить ключ":"Check the key",
+"вписываешь один раз — адрес, модель и ключ запоминаются и остаются после перезапуска.":"enter it once — the address, model and key are remembered and survive a restart.",
+"Пусто — спрошу":"Empty — I'll ask",
+"Не тратить запрос на спокойные сцены":"Don't spend a request on calm scenes",
+"Подсказывать, куда вести сцену":"Suggest where to take the scene",
+"в том же запросе, без доплаты: модель смотрит, что уже было, и одной фразой подсказывает основной,":"in the same request, at no extra cost: the model looks at what already happened and in one sentence tells the main one",
+"что сделать иначе в следующем ответе — сменить темп, задержаться, вплести предпочтение":"what to do differently in the next reply — change the pace, linger, weave in a preference",
+"последняя подсказка: «":"last hint: “",
+"заполни эндпоинт, модель и ключ":"fill in the endpoint, model and key",
+"модель ответила:":"the model replied:",
+"модель на связи":"model is connected",
+"модель:":"model:",
+"модель не ответила":"the model didn't reply",
+"сначала подключи устройство":"connect a device first",
+"пока пусто":"empty for now",
+"Когда в ответе сработает триггер, он появится здесь карточкой.":"When a trigger fires in a reply, it shows up here as a card.",
+"сейчас в сцене":"in the scene now",
+"в":"in",
+"ничего нового":"nothing new",
+"нашла":"found",
+"нет доступа к чату":"no access to the chat",
+"чат пустой":"the chat is empty",
+"чата":"the chat",
+"не вижу карточку персонажа":"can't see the character card",
+"в карточке нет текста":"the card has no text",
+"карточки":"the card",
+"не вышло прочитать карточку":"couldn't read the card",
+"и готовые, и свои — по кругу до СТОП":"both ready and custom ones — loop until STOP",
+"один раз, потом сцену снова ведёт персонаж":"once, then the character leads the scene again",
+"нажми любой — здесь напишу, что он делает":"tap any — I'll describe what it does here",
+"не знает совсем: игрушкой управляешь ты или плагин по тексту сцены, а персонаж ни разу её не достанет":"doesn't know at all: you or the plugin drive the toy from the scene text, and the character never brings it out",
+"знает с первого ответа, какая она и какими словами её включать, и может сам принести её в сцену":"knows from the first reply what it is and which words turn it on, and can bring it into the scene",
+"узнаёт, только когда игрушка уже есть — в переписке или в карточке персонажа. Сам в сцену её не принесёт.":"learns about it only once the toy is already there — in the chat or in the character card. Won't bring it into the scene on its own.",
+"Сейчас она в сцене — рассказываю.":"It's in the scene now — telling.",
+"Сейчас её в сцене нет — молчу.":"It's not in the scene now — staying quiet.",
+"свернуть ▴":"collapse ▴",
+"все рисунки ·":"all patterns ·",
+"моторы сцеплены":"motors linked",
+"мягче":"softer",
+"как задумано":"as intended",
+"сильнее":"stronger",
+"вдвое":"double",
+"никогда":"never",
+"редко":"rarely",
+"иногда":"sometimes",
+"часто":"often",
+"секунда":"one second",
+"две":"two",
+"пять":"five",
+"как в настройках":"as in settings",
+"до 8":"up to 8",
+"до 12":"up to 12",
+"до 16":"up to 16",
+"нет":"no",
+"если в сцене":"if in the scene",
+"всегда":"always",
+"мельче":"smaller",
+"обычный":"normal",
+"крупнее":"larger",
+"ещё крупнее":"even larger",
+"чуть":"a little",
+"заметно":"noticeably",
+"своенравно":"wilful",
+"резко":"sharp",
+"очень мягко":"very soft",
+"слабый фон":"light background",
+"заметный фон":"noticeable background",
+"когда это менять":"when to change this",
+"По умолчанию 127.0.0.1 — это Intiface на том же телефоне, менять ничего не нужно.":"By default 127.0.0.1 is Intiface on the same phone — nothing to change.",
+"Другой адрес нужен, только если Intiface крутится на компьютере: тогда ws://IP-компа:12345":"Another address is only needed if Intiface runs on a computer: then ws://computer-IP:12345",
+"и «Listen on all network interfaces» в самом Intiface.":"and “Listen on all network interfaces” in Intiface itself.",
+"где взять адрес":"where to get the address",
+"В приложении Lovense Remote: Game Mode → Local API. Порт 20010 — обычный, 30010 — защищённый.":"In the Lovense Remote app: Game Mode → Local API. Port 20010 is plain, 30010 is secure.",
+"что уходит":"what's sent",
+"POST шлёт JSON {v, pct, rotate, pump, suction, thrust}. Подходит для XToys, Home Assistant, своего моста или ESP32.":"POST sends JSON {v, pct, rotate, pump, suction, thrust}. Works with XToys, Home Assistant, your own bridge or an ESP32.",
+"Вибрирует сам телефон. Железо не нужно — удобно проверить сцену без игрушки.":"The phone itself vibrates. No hardware needed — handy for testing a scene without a toy.",
+"Кто участвует":"Who takes part",
+"список живой — это то, что сейчас видит Intiface.":"the list is live — it's what Intiface sees right now.",
+"Выключенную помню по имени, сама она обратно не включится.":"A switched-off toy is remembered by name; it won't switch back on by itself.",
+"Что это за игрушка":"What kind of toy",
+"Intiface знает только моторы, а форму — нет.":"Intiface only knows the motors, not the shape.",
+"Персонаж будет описывать игрушку такой, какая она здесь.":"The character will describe the toy the way it's set here.",
+"угадать по названию заново":"guess from the name again",
+"угадала:":"guessed:",
+"не узнала — выбери, какая":"didn't recognise it — choose which",
+"Работает воздухом (вакуум)":"Works with air (suction)",
+"персонаж узнает только, что игрушка подключена":"the character only learns that a toy is connected",
+", воздух":", air",
+"⚠ рубильник в настройках выключен":"⚠ master switch in settings is off",
+"персонаж не ведёт — игрушка молчит":"the character isn't driving — the toy is silent",
+"сейчас ведёшь ты — отправишь сообщение, и снова персонаж":"you're leading now — send a message and the character takes over again",
+"персонаж ведёт игрушку":"the character drives the toy",
+"до":"up to",
+"вслепую — только по ощущениям":"blind — by feel only",
+"дразнит — тишина":"teasing — silence",
+"в сцене её выключили":"switched off in the scene",
+"свернули — пауза":"minimised — paused",
+"ведёшь ты":"you're leading",
+"вручную":"manual",
+"ждём ответ":"waiting for the reply",
+"отклик":"response",
+"идёт сцена":"scene playing",
+"сцена кончилась — жду ответ":"scene over — waiting for the reply",
+"▶ игра":"▶ play",
+"пока ничего не играло":"nothing has played yet",
+"чат закрыт":"chat closed",
+"новый чат":"new chat",
+"язык пульта":"panel language",
+"авто":"auto",
+"русский":"Русский",
+"English":"English",
+"как у телефона или браузера. Подсказки модели всегда идут на языке самой переписки":"follows your phone or browser. Hints to the model always use the language of the chat itself"};
+
+// Строки с числами внутри — целиком, иначе порядок слов разъезжается.
+var EN_RULES = [
+  [/^язык пульта: (ru|en) \(выбрано: (auto|ru|en), (?:Таво|Таверна): (.*), система: (.*)\)$/, 'panel language: $1 (chosen: $2, app: $3, system: $4)'],
+  [/^«авто» — как язык (Таво|Таверны), иначе как у телефона\. Подсказки модели всегда идут на языке самой переписки$/, function(m, h){ return '“auto” follows ' + (h === 'Таво' ? 'Tavo' : 'SillyTavern') + '\'s language, otherwise the phone\'s. Hints to the model always use the language of the chat itself'; }],
+  [/^шаг (\d+) из (\d+)$/, 'step $1 of $2'],
+  [/^тест: три толчка по (\d+)\/20 — (шесть|три) секунды$/, function(m, a, b){ return 'test: three pulses at ' + a + '/20 — ' + (b === 'шесть' ? 'six' : 'three') + ' seconds'; }],
+  [/^\+(\d+) команд[а]? из ответа → (\d+)\/20$/, '+$1 command(s) from the reply → $2/20'],
+  [/^в сцене (прибавил|убавил|включил) → (\d+)\/20$/, function(m, a, b){ return 'in the scene: ' + ({ 'прибавил': 'turned up', 'убавил': 'turned down', 'включил': 'turned on' })[a] + ' → ' + b + '/20'; }],
+  [/^команда «(вверх|вниз|стоп)» → (\d+)\/20$/, function(m, a, b){ return 'command “' + ({ 'вверх': 'up', 'вниз': 'down', 'стоп': 'stop' })[a] + '” → ' + b + '/20'; }],
+  [/^вернулись через (\d+) с$/, 'back after $1 s'],
+  [/^ответа нет дольше (\d+) мин$/, 'no reply for more than $1 min'],
+  [/^Чтобы (Таво|Таверна) вообще (?:смогла|смог) достучаться, в настройках Intiface включи$/, function(m, h){ return 'For ' + (h === 'Таво' ? 'Tavo' : 'SillyTavern') + ' to reach it at all, turn on in the Intiface settings'; }],
+  [/^погаснет экран — система усыпит (Таво|Таверну?), и игрушка замрёт на полуслове$/, function(m, h){ return 'if the screen goes off, the system puts ' + (/^Таво/.test(h) ? 'Tavo' : 'SillyTavern') + ' to sleep and the toy stops mid-word'; }],
+  [/^нашла (\d+)$/, 'found $1'],
+  [/^в (чата|карточки) ничего нового$/, function(m, a){ return 'nothing new in ' + (a === 'чата' ? 'the chat' : 'the card'); }]
+];
+
+var I18N_ROOTS = ['pv-win', 'pv-dock', 'pv-stop2', 'pv-tour'];
+var I18N_CACHE = {}, I18N_FRAG = null, I18N_OBS = null;
+function i18nEsc(x){ return x.replace(/[.*+?^$\{}()|[\]\\]/g, '\\$&'); }
+
+function trPart(x){
+  var t = x.trim();
+  if (!t || !/[а-яё]/i.test(t)) return x;
+  var m = /^(.*?)( ×\d+)?$/.exec(t);
+  var hit = EN_UI[m[1]];
+  return hit != null ? x.replace(t, hit + (m[2] || '')) : x;
+}
+
+/* Перевод не имеет права ломать пульт: любая ошибка — и строка остаётся как есть,
+   а в журнал один раз уходит, что именно не так. */
+var I18N_ERR = false;
+function tr(t){
+  try { return trRaw(t); }
+  catch(e){
+    if (!I18N_ERR){ I18N_ERR = true; try { log('err', 'перевод: ' + String(e && e.message || e).slice(0, 80)); } catch(_){} }
+    return t;
+  }
+}
+
+function trRaw(t){
+  if (uiLang() !== 'en' || !t || !/[а-яё]/i.test(t)) return t;
+  if (I18N_CACHE[t] != null) return I18N_CACHE[t];
+  var m = /^(\s*)([\s\S]*?)(\s*)$/.exec(t), core = m[2], out = EN_UI[core];
+  if (out == null){
+    for (var i = 0; i < EN_RULES.length && out == null; i++){
+      if (EN_RULES[i][0].test(core)) out = core.replace(EN_RULES[i][0], EN_RULES[i][1]);
+    }
+  }
+  if (out == null){
+    if (!I18N_FRAG){
+      // Куски от шести букв — и имена хостов. Короткие слова вроде «он» или «сек»
+      // заменять внутри чужого текста нельзя: только когда это вся строка целиком.
+      // Не одним регэкспом на шестьсот вариантов: движок айфона такой не собирает,
+      // и перевод падал целиком. Простой поиск подстрок — от длинных к коротким.
+      I18N_FRAG = Object.keys(EN_UI).filter(function(k){ return /[а-яё]/i.test(k) && (k.length >= 6 || /^Таво|^Таверн/.test(k)); })
+        .sort(function(a, b){ return b.length - a.length; });
+    }
+    var f = core;
+    for (var j = 0; j < I18N_FRAG.length; j++){
+      if (f.indexOf(I18N_FRAG[j]) >= 0) f = f.split(I18N_FRAG[j]).join(EN_UI[I18N_FRAG[j]]);
+      if (!/[а-яё]/i.test(f)) break;
+    }
+    out = f
+      .replace(/([«“])([^«»“”]{1,30})([»”])/g, function(a, q1, x, q2){ var h = EN_UI[x]; return h != null ? '“' + h + '”' : a; })
+      .replace(/(\d)\s*(?:сек|с)(?![а-яё])/gi, '$1 s')
+      .replace(/(\d)\s*(?:мин|м)(?![а-яё])/gi, '$1 min')
+      .replace(/(^|\s)до (\d)/g, '$1up to $2')
+      .replace(/(\d+) из (\d+)/g, '$1 of $2')
+      .replace(/([«“][^«»“”]{1,30})»\s*на (\d)/g, '$1” at $2')
+      .replace(/«/g, '“').replace(/»/g, '”')
+      .split(/( · | — |, |: | \+ | → |\/)/).map(trPart).join('')
+      .replace(/ {2,}/g, ' ');
+  }
+  return (I18N_CACHE[t] = m[1] + out + m[3]);
+}
+
+function i18nSkip(n){
+  var e = n && (n.nodeType === 1 ? n : n.parentNode);
+  if (!e || !e.closest) return true;
+  if (e.closest('script,style,textarea,input,[data-noi18n]')) return true;
+  return !I18N_ROOTS.some(function(id){ return e.closest('#' + id); });
+}
+
+var I18N_ATTRS = ['placeholder', 'title', 'aria-label'];
+function i18nNode(n, back){
+  try { i18nNodeRaw(n, back); } catch(e){ if (!I18N_ERR){ I18N_ERR = true; try { log('err', 'перевод: ' + String(e && e.message || e).slice(0, 80)); } catch(_){} } }
+}
+function i18nNodeRaw(n, back){
+  if (n.nodeType === 3){
+    var v = n.nodeValue;
+    if (back){ if (n.__en != null && v === n.__en) n.nodeValue = n.__ru; return; }
+    if (!/[а-яё]/i.test(v) || v === n.__en || i18nSkip(n)) return;
+    var x = tr(v);
+    if (x !== v){ n.__ru = v; n.__en = x; n.nodeValue = x; }
+    return;
+  }
+  if (n.nodeType !== 1) return;
+  if (!back && i18nSkip(n)) return;
+  I18N_ATTRS.forEach(function(a){
+    var v = n.getAttribute && n.getAttribute(a); if (!v) return;
+    n.__ruA = n.__ruA || {};
+    if (back){ if (n.__ruA[a] != null) n.setAttribute(a, n.__ruA[a]); return; }
+    if (!/[а-яё]/i.test(v)) return;
+    var x = tr(v); if (x !== v){ n.__ruA[a] = v; n.setAttribute(a, x); }
+  });
+  var kids = n.childNodes || [];
+  for (var i = 0; i < kids.length; i++) i18nNode(kids[i], back);   // каждый ребёнок отдельно: ошибка в одном не остановит остальных
+}
+
+// Перевести всё, что уже на экране, и следить за новым.
+function i18nApply(){
+  var en = uiLang() === 'en';
+  I18N_ROOTS.forEach(function(id){ var e = el(id); if (e) i18nNode(e, !en); });
+  try { pdoc.documentElement.setAttribute('data-pv-lang', en ? 'en' : 'ru'); } catch(e){}
+  if (!I18N_OBS && typeof MutationObserver !== 'undefined'){
+    I18N_OBS = new MutationObserver(function(list){
+      if (uiLang() !== 'en') return;
+      list.forEach(function(m){
+        if (m.type === 'characterData') i18nNode(m.target, false);
+        else if (m.type === 'attributes') i18nNode(m.target, false);
+        else for (var i = 0; i < m.addedNodes.length; i++) i18nNode(m.addedNodes[i], false);
+      });
+    });
+    // Страховка на случай, если наблюдатель в чьём-то WebView молчит: раз в две
+    // секунды досматриваем открытый пульт. Уже переведённое пропускается сразу.
+    setInterval(function(){
+      if (uiLang() !== 'en') return;
+      var w = el('pv-win');
+      if (w && w.classList.contains('on')) i18nNode(w, false);
+      I18N_ROOTS.slice(1).forEach(function(id){ var e = el(id); if (e) i18nNode(e, false); });
+    }, 2000);
+    // body при первом запуске может ещё не существовать — следим за всем документом
+    try { I18N_OBS.observe(pdoc.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: I18N_ATTRS }); } catch(e){}
+  }
+}
+PV.tr = tr;
+
 /* ═══════════════ проводка ═══════════════ */
 
 function rewire(){
@@ -5718,6 +6872,19 @@ function rewire(){
     } catch(e){}
   }
   setDriver(C.driver || 'intiface');
+  i18nApply();
+  try {
+    var ti = tavoI18n();
+    if (ti && ti.onChange && !PV._langWatch){
+      PV._langWatch = 1;
+      ti.onChange(function(){ I18N_CACHE = {}; i18nApply(); try { paintPicks(); } catch(e){} buildPrompt(); });
+    }
+  } catch(e){}
+  if (!PV._langLogged){
+    PV._langLogged = 1;
+    var сис = ''; try { сис = String((pwin.navigator || navigator).language || ''); } catch(e){}
+    log('cfg', 'язык пульта: ' + uiLang() + ' (выбрано: ' + (lsGet('pv_lang', null) || C.lang || 'auto') + ', ' + ХОСТ.имя + ': ' + (tavoLocale() || '?') + ', система: ' + (сис || '?') + ')');
+  }
   loadCfgFromTavo();                     // правда из переменных Таво приедет следом
   pickChat();                            // он же разберёт карточку, когда узнает чат
   pickNames();
