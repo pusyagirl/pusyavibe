@@ -1576,10 +1576,10 @@ function mainChannel(){
 
 var MARK = [
   { w: 6,  src: 'касан|ладон|гладит|шепч|шёпот|поцелу|целу|прижим|обнима|мурашк|кожа|дыхани' },
-  { w: 11, src: 'стон|выгиба|дрож|бедр|между ног|влажн|сосок|соски|язык|пальц|трётся|вцеп|кусает|задыха|сжима|бельё|обнаж' },
+  { w: 11, src: 'стон|выгиба|дрож|бедр|между ног|влажн|сосок|соски|язык|пальц|трётся|вцеп|кусает|задыха|сжима|бельё|обнаж|возбужд|раздвин|раздвига|груд(?:ь|и|ью)|трах|ласка(?:ет|ть|ми)' },
   { w: 17, src: 'глубже|быстрее|ещё сильнее|толчк|входит|внутри|содрога|умоля|на грани|не выдерж|срыва|оргазм|кончает|кончи|пик наслажд' },
   { w: 6,  src: 'touch|caress|strok(?:e|es|ed|ing)\\b|palm|whisper|kiss|embrac|hug(?:s|ged|ging)?\\b|goosebump|shiver|breath|nuzzl|skin\\b' },
-  { w: 11, src: 'moan|arch(?:es|ed|ing)\\b|trembl|quiver|thigh|between (?:her|his|my|your) legs|wet(?:ness)?\\b|nipple|tongue|finger|grind|clutch|gasp|squeez|lingerie|undress|naked' },
+  { w: 11, src: 'moan|arch(?:es|ed|ing)\\b|trembl|quiver|thigh|between (?:her|his|my|your) legs|wet(?:ness)?\\b|nipple|tongue|finger|grind|clutch|gasp|squeez|lingerie|undress|naked|arous|spread (?:her|your|my|those) legs|breasts?\\b|clit|pussy|cock\\b|fuck(?:s|ed|ing)? (?:her|him|me|you)\\b' },
   { w: 17, src: 'deeper|faster|harder|thrust|inside (?:her|him|me|you)|enter(?:s|ed|ing)? (?:her|him|me|you)|convuls|beg(?:s|ged|ging)\\b|on the edge|can.t take|orgasm|climax|cum(?:s|ming)?\\b|coming undone|shatter' }
 ];
 var MARK_RE = MARK.map(function(g){ return { w: g.w, re: new RegExp('(^|[^а-яёА-ЯЁa-zA-Z])(' + g.src + ')', 'gi') }; });
@@ -1593,6 +1593,28 @@ var ORDERS_RE = [
 ].map(function(o){
   return { d: o.d, re: new RegExp('(?:^|[^а-яёА-ЯЁa-zA-Z])(?:' + o.re + ')(?=\\s*(?:[,.!?…:;»"”)\\-—]|$))', 'gi') };
 });
+
+function толькоРечь(t){
+  t = String(t || '');
+  var out = '', вКавычках = false, ремарка = false, речьСтроки = false, начало = true;
+  for (var i = 0; i < t.length; i++){
+    var ch = t[i];
+    if (ch === '\n'){ out += ch; речьСтроки = false; ремарка = false; начало = true; continue; }
+    if (начало){
+      if (ch === ' ' || ch === '\t'){ out += ch; continue; }
+      начало = false;
+      if ((ch === '—' || ch === '–') && t[i + 1] === ' '){ речьСтроки = true; out += ' '; continue; }
+    }
+    if (речьСтроки && !вКавычках && (ch === '—' || ch === '–') && t[i - 1] === ' ' && t[i + 1] === ' '){
+      ремарка = !ремарка; out += ' '; continue;
+    }
+    if (ch === '«' || ch === '“' || ch === '„'){ вКавычках = true; out += ' '; continue; }
+    if (ch === '»' || ch === '”'){ вКавычках = false; out += ch; continue; }
+    if (ch === '"'){ вКавычках = !вКавычках; out += вКавычках ? ' ' : ch; continue; }
+    out += (вКавычках || (речьСтроки && !ремарка)) ? ch : ' ';
+  }
+  return out;
+}
 
 function orderOf(text){
   var t = String(text || ''), лучший = '', где = -1;
@@ -1756,7 +1778,7 @@ function deviceActOf(text){
   return { act: акт, level: уровень, preset: режим };
 }
 
-var ОБЩИЕ = /^(?:кож|дыхани|ладон|касан|шепч|шёпот|пальц|язык|сжима|дрож|глубже|быстрее|внутри|breath|skin|palm|touch|whisper|shiver|finger|tongue|gasp|clutch|squeez|trembl|quiver|deeper|faster|harder)/i;
+var ОБЩИЕ = /^(?:кож|груд|дыхани|ладон|касан|шепч|шёпот|пальц|язык|сжима|дрож|глубже|быстрее|внутри|breath|skin|palm|touch|whisper|shiver|finger|tongue|gasp|clutch|squeez|trembl|quiver|deeper|faster|harder)/i;
 
 function heatOf(text){
   var t = String(text || ''), hits = 0, top = 0, hot = 0, strong = 0;
@@ -1792,7 +1814,7 @@ function heuristic(text){
   return steps;
 }
 
-var GEN_TIMEOUT = 45000;
+var GEN_TIMEOUT = 90000;
 function modelAsk(prompt, sys){
   var ep = String(C.ep || '').trim().replace(/\/+$/, '');
   if (!/\/chat\/completions$/.test(ep)) ep += '/chat/completions';
@@ -1815,6 +1837,10 @@ function modelAsk(prompt, sys){
     var out = c && c.content;
     if (!out) throw new Error('пустой ответ модели');
     return String(out);
+  }, function(e){
+    if (tid) clearTimeout(tid);
+    if (e && e.name === 'AbortError') throw new Error('модель не ответила за ' + Math.round(GEN_TIMEOUT / 1000) + ' сек');
+    throw e;
   });
 }
 
@@ -1865,6 +1891,7 @@ function analystSys(){
     ? '5. Последней строкой — <hint>…</hint>: одно предложение для рассказчика, куда вести следующий ответ. ' +
       'Смотри, что уже было, и предложи другое: сменить темп, задержаться, отступить, сменить положение или того, кто ведёт, ' +
       'вплести одну из предпочтений, если они даны. Если близость только началась — не торопить к финалу. ' +
+      'Подсказывай только то, что делает ' + NAMES.char + ', — рассказчик пишет за него. За ' + кемЗовут() + ' не решай: что чувствовать и делать, выбирает сам человек. ' +
       'Если сцена не интимная — <hint></hint> пустой. Без имён плагинов и без слов «игрушка управляется».' +
       ((C.toyMode == null ? 1 : +C.toyMode) === 2 || toyInScene() ? '' : ' Не предлагай вводить в сцену игрушки или устройства — их там нет.') + '\n' +
       '6. Никакого текста, кроме команд и этой строки.'
@@ -1903,6 +1930,7 @@ function analystSysEn(cap, caps, режиссёр){
     ? '5. Last line — <hint>…</hint>: one sentence in English for the narrator about where to take the next reply. ' +
       'Look at what has already happened and suggest something different: change the pace, linger, pull back, change position or who leads, ' +
       'weave in one of the preferences if given. If intimacy has only just begun, don\'t rush to the finish. ' +
+      'Suggest only what ' + NAMES.char + ' does — the narrator writes for them. Never decide for ' + кемЗовут() + ': what they feel and do is their own choice. ' +
       'If the scene isn\'t intimate, leave <hint></hint> empty. No plugin names and no words like "the toy is controlled".' +
       ((C.toyMode == null ? 1 : +C.toyMode) === 2 || toyInScene() ? '' : ' Don\'t suggest bringing toys or devices into the scene — there are none.') + '\n' +
       '6. No text other than the commands and this line.'
@@ -2041,7 +2069,7 @@ function flowScan(key, text){
   if (text.length < flowPos) flowPos = 0;
   if (text.length <= flowPos) return;
 
-  var chunk = text.slice(flowPos);
+  var chunk = text.slice(flowPos), от = flowPos;
   flowPos = text.length;
   var cap = capLevel();
   var было = E.flow.level || 0;
@@ -2079,7 +2107,12 @@ function flowScan(key, text){
 
   if (E.devHold && now() < E.devHold) return;
 
-  var приказ = C.orders ? orderOf(chunk) : '';
+  var приказ = '';
+  if (C.orders){
+    var речь = толькоРечь(text);
+    while (от > 0 && /[а-яёa-z'’]/i.test(речь[от - 1])) от--;
+    приказ = orderOf(речь.slice(от));
+  }
   if (приказ){
     if (приказ === 'вверх')  E.flow.level = clamp(Math.max(было + 4, Math.round(cap * 0.7)), 2, cap);
     if (приказ === 'вниз')   E.flow.level = clamp(Math.round((было || cap * 0.5) * 0.45), 1, cap);
@@ -2835,7 +2868,7 @@ function css(){
       'background:linear-gradient(160deg,#1a1015,#120a0e);border:1px solid rgba(200,100,120,.35);',
       'border-radius:20px;box-shadow:0 10px 30px rgba(0,0,0,.6);padding:14px 14px 8px;color:#e0c0c0;font-size:12px;line-height:1.45}',
     '#pv-card.pv-fixed{box-sizing:border-box;width:var(--pv-cw);height:var(--pv-ch);max-width:none;max-height:none}',
-    (НА_СТ ? '#pv-win.pv-sized{top:8px;bottom:8px}' : '#pv-win.pv-sized{}'),
+    (НА_СТ ? '#pv-win.pv-sized{top:8px;bottom:8px}html{height:100%}' : '#pv-win.pv-sized{}'),
     '#pv-win.pv-sized.on{align-items:flex-start}',
     '#pv-grip{position:absolute;right:2px;bottom:2px;width:20px;height:20px;cursor:nwse-resize;touch-action:none;',
       'border-right:2px solid rgba(200,100,120,.5);border-bottom:2px solid rgba(200,100,120,.5);border-radius:0 0 18px 0;opacity:.45}',
@@ -4345,7 +4378,9 @@ function paintBrains(){
   }
   ['pv-brain-now', 'pv-brain-now2'].forEach(function(id){
     var bn = el(id);
-    if (bn) bn.addEventListener('click', function(){
+    if (!bn || bn._pvBound) return;
+    bn._pvBound = true;
+    bn.addEventListener('click', function(){
       if (!D || D.state !== 'on'){ toast('сначала подключи устройство'); return; }
       brainNow();
     });
@@ -5954,6 +5989,7 @@ var EN_RULES = [
   [/^язык пульта: (ru|en) \(выбрано: (auto|ru|en), (?:Таво|Таверна): (.*), система: (.*)\)$/, 'panel language: $1 (chosen: $2, app: $3, system: $4)'],
   [/^«авто» — как язык (Таво|Таверны), иначе как у телефона\. Подсказки модели всегда идут на языке самой переписки$/, function(m, h){ return '“auto” follows ' + (h === 'Таво' ? 'Tavo' : 'SillyTavern') + '\'s language, otherwise the phone\'s. Hints to the model always use the language of the chat itself'; }],
   [/^шаг (\d+) из (\d+)$/, 'step $1 of $2'],
+  [/^аналитик: модель не ответила за (\d+) сек$/, 'analyst: the model didn\'t answer within $1 s'],
   [/^тест: три толчка по (\d+)\/20 — (шесть|три) секунды$/, function(m, a, b){ return 'test: three pulses at ' + a + '/20 — ' + (b === 'шесть' ? 'six' : 'three') + ' seconds'; }],
   [/^\+(\d+) команд[а]? из ответа → (\d+)\/20$/, '+$1 command(s) from the reply → $2/20'],
   [/^в сцене (прибавил|убавил|включил) → (\d+)\/20$/, function(m, a, b){ return 'in the scene: ' + ({ 'прибавил': 'turned up', 'убавил': 'turned down', 'включил': 'turned on' })[a] + ' → ' + b + '/20'; }],
