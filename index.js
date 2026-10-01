@@ -1,13 +1,3 @@
-/* PUSYA VIBE ≋ для SillyTavern. Автор: Пуся · t.me/pusgir
-
-   Окно то же самое, что в Таво: panel.js — это панель из плагина Таво без
-   изменений. Этот файл только переводит Таверну на язык, который панель
-   понимает: сообщения, карточка, имя, переменные, тихий запрос к модели.
-   Игрушка подключается напрямую через Intiface, как в Таво — моста нет.
-
-   В «Расширениях» лежит только то, что в Таво живёт в настройках плагина:
-   разрешение ИИ управлять, потолок, автостоп и стоп-слово. */
-
 import {
     eventSource,
     event_types,
@@ -21,23 +11,19 @@ import { extension_settings } from '../../../extensions.js';
 const MODULE = 'pusyavibe';
 const PROMPT_TAG = 'pusya_vibe';
 
-// Где лежит расширение: Таверна называет папку по имени репозитория.
 const BASE = (() => {
     try { return new URL('.', import.meta.url).pathname; } catch { return '/scripts/extensions/third-party/SillyTavern-PusyaVibe/'; }
 })();
 
 const ctx = () => SillyTavern.getContext();
 
-/* ── настройки плагина (в Таво — экран настроек плагина) ── */
-
-/* Язык — как у пульта: выбранный в нём, иначе язык Таверны или браузера. */
 function lang() {
     try {
         const c = JSON.parse(localStorage.getItem('pv_cfg_v1') || '{}');
         if (c.lang === 'ru' || c.lang === 'en') return c.lang;
-    } catch { /* нет сохранённых настроек — смотрим дальше */ }
+    } catch {}
     let l = '';
-    try { l = String(localStorage.getItem('language') || navigator.language || ''); } catch { /* нет хранилища — считаем по-английски */ }
+    try { l = String(localStorage.getItem('language') || navigator.language || ''); } catch {}
     return /^(ru|uk|be|kk)/i.test(l) ? 'ru' : 'en';
 }
 const EN = lang() === 'en';
@@ -53,7 +39,6 @@ function S() {
     return s;
 }
 
-// Панель читает эти границы отсюда, как в Таво читает их из настроек плагина.
 function publishHost() {
     const h = S().host;
     window.__pv_host = {
@@ -63,8 +48,6 @@ function publishHost() {
         safeword: String(h.safeword || '').trim().toLowerCase(),
     };
 }
-
-/* ── переходник: то, что панель спрашивает у Таво ── */
 
 function charOf(id) {
     const c = ctx();
@@ -85,7 +68,6 @@ function charOf(id) {
     };
 }
 
-// Отступы шапки и поля ввода — окно и кнопка ≋ встают между ними.
 const insetWatchers = [];
 function insets() {
     const top = document.getElementById('top-bar');
@@ -100,19 +82,16 @@ function applyInsets() {
     const root = document.documentElement.style;
     root.setProperty('--tavo-inset-top-bar', i.topBar + 'px');
     root.setProperty('--tavo-inset-bottom-input', i.bottomInput + 'px');
-    for (const f of insetWatchers) { try { f(i); } catch { /* панель сама разберётся */ } }
+    for (const f of insetWatchers) { try { f(i); } catch {} }
 }
 
 const переходник = {
-    // Язык самой Таверны — пульт в режиме «авто» идёт за ним, как в Таво.
     plugin: {
         i18n: {
             get locale() { try { return String(localStorage.getItem('language') || ''); } catch { return ''; } },
         },
     },
     message: {
-        // Пульту нужен хвост чата: последнее сообщение и немного истории для «из чата».
-        // Весь чат на каждый токен потока — лишняя работа на длинных переписках.
         find: async () => { const all = ctx().chat || [], от = Math.max(0, all.length - 60); return all.slice(от).map((m, k) => ({
             id: от + k,
             role: m.is_user ? 'user' : (m.is_system ? 'system' : 'assistant'),
@@ -151,14 +130,13 @@ const переходник = {
             saveSettingsDebounced();
         },
     },
-    // Вторая модель без своего ключа — тихий запрос через текущее подключение Таверны.
     generate: async (prompt) => {
         const gen = ctx().generateQuietPrompt;
         if (typeof gen !== 'function') throw new Error(EN ? 'SillyTavern gave no quiet request — enter your own key' : 'Таверна не дала тихий запрос — впиши свой ключ');
         try {
             const r = await gen({ quietPrompt: prompt, skipWIAN: true });
             if (r) return String(r);
-        } catch { /* старая сигнатура */ }
+        } catch {}
         return String(await gen(prompt, false, true) || '');
     },
     utils: { toast: (t) => toastr.info(String(t), 'PUSYA VIBE') },
@@ -168,31 +146,23 @@ const переходник = {
     },
 };
 
-/* ── что панель просит у модели ── */
-
 let lastPrompt = '';
 function applyPrompt() {
     const p = S().host.aiControl ? lastPrompt.trim() : '';
     setExtensionPrompt(PROMPT_TAG, p, extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.SYSTEM);
 }
 
-// Таверна зовёт это перед каждой генерацией и ждёт: панель успевает прочесть
-// твоё сообщение и собрать текст для модели до того, как соберётся промпт.
 globalThis.pusyaVibeBeforeGenerate = async (chat, contextSize, abort, type) => {
-    if (type === 'quiet') return;               // тихий запрос второй модели — не наш ход
-    try { await window.PV?.readNow?.(); } catch { /* панель могла ещё не загрузиться */ }
+    if (type === 'quiet') return;
+    try { await window.PV?.readNow?.(); } catch {}
     applyPrompt();
 };
 
-/* ── события Таверны → события, которые слушает панель ── */
-
 function fire(name) {
     publishHost();
-    try { window.dispatchEvent(new CustomEvent(name)); } catch { /* старый браузер */ }
+    try { window.dispatchEvent(new CustomEvent(name)); } catch {}
 }
 
-// Поток токенов идёт очень часто; панель ждёт паузу в 160 мс, поэтому шлём не чаще
-// раза в 400 мс — иначе живой отклик проснулся бы только в конце ответа.
 let msgAt = 0, msgTimer = null;
 function onMsg() {
     const t = Date.now();
@@ -200,8 +170,6 @@ function onMsg() {
     if (t - msgAt >= 400) { msgAt = t; fire('pv-msg'); }
     else msgTimer = setTimeout(() => { msgAt = Date.now(); fire('pv-msg'); }, 400 - (t - msgAt));
 }
-
-/* ── блок в «Расширениях» ── */
 
 const DRAWER = `
 <div class="inline-drawer" id="pv_root">
@@ -283,19 +251,17 @@ function mountDrawer() {
 
     $('#pvx_ai').prop('checked', !!h.aiControl).on('change', function () {
         h.aiControl = $(this).prop('checked'); save();
-        try { window.PV?.repaint?.(); } catch { /* ещё не загрузилась */ }
+        try { window.PV?.repaint?.(); } catch {}
     });
     $('#pvx_cap').val(String(h.capLevel)).on('change', function () { h.capLevel = +$(this).val(); save(); window.PV?.repaint?.(); });
     $('#pvx_max').val(String(h.maxMinutes)).on('change', function () { h.maxMinutes = +$(this).val(); save(); });
     $('#pvx_safe').val(h.safeword).on('input', function () { h.safeword = $(this).val(); save(); });
     $('#pvx_open').on('click', () => fire('pusya-open-vibe'));
-    $('#pvx_win').on('click', () => { try { window.PV?.resetWin?.(); } catch { /* ещё не загрузилась */ } });
+    $('#pvx_win').on('click', () => { try { window.PV?.resetWin?.(); } catch {} });
     $('#pvx_dock').on('click', () => {
-        try { window.PV?.resetDock?.(); } catch { /* ещё не загрузилась */ }
+        try { window.PV?.resetDock?.(); } catch {}
     });
 }
-
-/* ── запуск ── */
 
 function loadPanel() {
     return new Promise((resolve, reject) => {
@@ -320,7 +286,7 @@ jQuery(async () => {
     try {
         const ro = new ResizeObserver(applyInsets);
         for (const id of ['top-bar', 'form_sheld']) { const n = document.getElementById(id); if (n) ro.observe(n); }
-    } catch { /* без наблюдателя обойдёмся resize */ }
+    } catch {}
 
     try {
         await loadPanel();
@@ -336,7 +302,7 @@ jQuery(async () => {
     }
     eventSource.on(event_types.CHAT_CHANGED, () => {
         lastPrompt = ''; applyPrompt();
-        fire('pv-panic');                        // прежний чат закрыт — глушим железо
+        fire('pv-panic');
         fire('pv-chat-opened');
     });
 
